@@ -16,10 +16,14 @@ from pydantic import BaseModel, Field
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
 sys.path.append(PROJECT_ROOT)
-sys.path.append(os.path.join(PROJECT_ROOT, 'ductri_hgt_update'))
 
 from model.AMNTDDA import AMNTDDA
-from data_preprocess import get_adj, k_matrix, dgl_similarity_graph, dgl_heterograph
+
+# Chọn Preprocess phù hợp với Version mô hình
+if os.environ.get('HGT_MODEL_VERSION', 'improved') == 'improved':
+    from data_preprocess_improved import get_adj, k_matrix, dgl_similarity_graph, dgl_heterograph
+else:
+    from AMDGT_original.data_preprocess import get_adj, k_matrix, dgl_similarity_graph, dgl_heterograph
 
 app = FastAPI(title='HGT Drug-Disease Prediction API', version='2.0.0')
 
@@ -39,8 +43,8 @@ class InferenceManager:
         self.cached_data = {}
 
     def get_dataset_paths(self, dataset_name: str):
-        data_dir = os.path.join(PROJECT_ROOT, 'ductri_hgt_update', 'data', dataset_name, '')
-        model_path = os.path.join(PROJECT_ROOT, 'ductri_hgt_update', 'Result', dataset_name, 'AMNTDDA', 'best_model.pth')
+        data_dir = os.path.join(PROJECT_ROOT, 'AMDGT_original', 'data', dataset_name, '')
+        model_path = os.path.join(PROJECT_ROOT, 'Result', dataset_name, 'AMNTDDA', 'best_model.pth')
         return data_dir, model_path
 
     def load_context(self, dataset_name: str):
@@ -72,8 +76,8 @@ class InferenceManager:
         
         # Load CSV metadata for UI display
         drugs_info = self.load_csv(data_dir + 'DrugInformation.csv')
-        disease_info = self.load_disease_info(data_dir + 'DiseaseFeature.csv')
-        protein_info = self.load_csv(data_dir + 'ProteinInformation.csv')
+        disease_info = self.load_csv(data_dir + 'DiseaseInformation.csv')
+        protein_info = self.load_csv(data_dir + 'ProteinNameMap.csv')
 
         # Load numerical data for model
         drf = pd.read_csv(data_dir + 'DrugFingerprint.csv').iloc[:, 1:].to_numpy()
@@ -253,7 +257,8 @@ async def predict(payload: PredictRequest):
     # Show top 5 proteins connected to source (from metadata)
     for p in ctx['protein_info'][:5]:
         p_id = f"protein:{p['id']}"
-        graph_nodes.append({'id': p_id, 'actual_id': p['id'], 'label': p.get('name', p['id']), 'type': 'protein', 'color': '#f59e0b'})
+        label = p.get('protein_name', p.get('name', p['id']))
+        graph_nodes.append({'id': p_id, 'actual_id': p['id'], 'label': label, 'type': 'protein', 'color': '#f59e0b'})
         graph_links.append({'source': graph_nodes[0]['id'], 'target': p_id, 'score': 0.8})
 
     for res in results[:5]:

@@ -20,36 +20,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             $resultData = PredictionService::callPythonApi($queryType, $inputText, $topK, $dataset);
             
-            // Enrich results with names from local database if missing/ID-only
-            if (!empty($resultData['results'])) {
-                foreach ($resultData['results'] as &$item) {
-                    if (($item['type'] ?? '') === 'disease') {
-                        $stmt = db()->prepare('SELECT name FROM diseases WHERE source_code = :code LIMIT 1');
-                        $stmt->execute(['code' => $item['id']]);
-                        $dbDisease = $stmt->fetch();
-                        if ($dbDisease) {
-                            $item['name'] = $dbDisease['name'];
-                        }
-                    }
-                }
-            }
-            unset($item);
-
-            // Enrich graph node labels as well
-            if (!empty($resultData['graph']['nodes'])) {
-                foreach ($resultData['graph']['nodes'] as &$node) {
-                    if (($node['type'] ?? '') === 'disease') {
-                        $stmt = db()->prepare('SELECT name FROM diseases WHERE source_code = :code LIMIT 1');
-                        $stmt->execute(['code' => $node['actual_id'] ?? $node['id']]);
-                        $dbDisease = $stmt->fetch();
-                        if ($dbDisease) {
-                            $node['label'] = $dbDisease['name'];
-                        }
-                    }
-                }
-            }
-            unset($node);
-
             PredictionService::saveHistory((int) $user['id'], $queryType, $inputText, $topK, $resultData);
             flash('success', 'Thành công');
             $_SESSION['latest_graph'] = $resultData['graph'] ?? ['nodes' => [], 'links' => []];

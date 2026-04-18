@@ -11,6 +11,7 @@ class AMNTDDA(nn.Module):
         super(AMNTDDA, self).__init__()
         self.args = args
         self.drug_linear = nn.Linear(300, args.hgt_in_dim)
+        self.disease_linear = nn.Linear(64, args.hgt_in_dim)
         self.protein_linear = nn.Linear(320, args.hgt_in_dim)
         self.gt_drug = gt_net_drug.GraphTransformer(device, args.gt_layer, args.drug_number, args.gt_out_dim, args.gt_out_dim,
                                                     args.gt_head, args.dropout)
@@ -50,6 +51,7 @@ class AMNTDDA(nn.Module):
         di_sim = self.gt_disease(didi_graph)
 
         drug_feature = self.drug_linear(drug_feature)
+        disease_feature = self.disease_linear(disease_feature)
         protein_feature = self.protein_linear(protein_feature)
 
         feature_dict = {
