@@ -101,11 +101,13 @@ if __name__ == '__main__':
         X_test = torch.LongTensor(data['X_test'][i]).to(device)
         Y_test = data['Y_test'][i].flatten()
 
-        # Tính toán pos_weight cho Weighted Cross Entropy
-        n_pos = torch.sum(Y_train).item()
-        n_neg = Y_train.numel() - n_pos
-        pos_weight = torch.tensor([n_neg / n_pos]).to(device)
-        criterion = nn.CrossEntropyLoss(weight=torch.tensor([1.0, n_neg/n_pos]).to(device))
+        # Tối ưu hóa Loss: Dùng BCEWithLogitsLoss ổn định hơn cho Link Prediction
+        n_pos = torch.sum(Y_train).float()
+        n_neg = (Y_train.numel() - n_pos)
+        # Khống chế trọng số tối đa là 20 để tránh nổ Gradient gây lỗi CUBLAS
+        pos_weight_val = min(n_neg / n_pos, 20.0)
+        pos_weight = torch.tensor([pos_weight_val]).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
         drdipr_graph, data = dgl_heterograph(data, data['X_train'][i], args)
         drdipr_graph = drdipr_graph.to(device)
@@ -115,12 +117,21 @@ if __name__ == '__main__':
         for epoch in range(args.epochs):
             model.train()
             _, train_score = model(drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, X_train)
-            train_loss = criterion(train_score, torch.flatten(Y_train))
+            
+            # Chuyển nhãn sang float cho BCE
+            targets = Y_train.float().view(-1, 1)
+            # Lấy logit của class 1 (liên kết thật)
+            logits = train_score[:, 1].view(-1, 1)
+            
+            train_loss = criterion(logits, targets)
             
             optimizer.zero_grad()
             train_loss.backward()
             optimizer.step()
             scheduler.step()
+
+            if (epoch + 1) % 50 == 0:
+                torch.cuda.empty_cache() # Giải phóng bộ nhớ định kỳ
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 model.eval()
