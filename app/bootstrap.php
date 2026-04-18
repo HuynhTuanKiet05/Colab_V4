@@ -1,0 +1,106 @@
+<?php
+
+declare(strict_types=1);
+
+$config = require __DIR__ . '/config.php';
+
+date_default_timezone_set('Asia/Ho_Chi_Minh');
+
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_name($config['session_name']);
+    session_start();
+}
+
+function config(string $key = null, mixed $default = null): mixed
+{
+    global $config;
+
+    if ($key === null) {
+        return $config;
+    }
+
+    $segments = explode('.', $key);
+    $value = $config;
+
+    foreach ($segments as $segment) {
+        if (!is_array($value) || !array_key_exists($segment, $value)) {
+            return $default;
+        }
+        $value = $value[$segment];
+    }
+
+    return $value;
+}
+
+function db(): PDO
+{
+    static $pdo = null;
+
+    if ($pdo instanceof PDO) {
+        return $pdo;
+    }
+
+    $dsn = sprintf(
+        'mysql:host=%s;port=%d;dbname=%s;charset=%s',
+        config('db.host'),
+        config('db.port'),
+        config('db.dbname'),
+        config('db.charset')
+    );
+
+    $pdo = new PDO($dsn, config('db.username'), config('db.password'), [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    ]);
+
+    return $pdo;
+}
+
+function e(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
+
+function redirect(string $path): never
+{
+    header('Location: ' . $path);
+    exit;
+}
+
+function is_logged_in(): bool
+{
+    return !empty($_SESSION['user']);
+}
+
+function current_user(): ?array
+{
+    return $_SESSION['user'] ?? null;
+}
+
+function require_login(): void
+{
+    if (!is_logged_in()) {
+        redirect('login.php');
+    }
+}
+
+function require_admin(): void
+{
+    require_login();
+    $user = current_user();
+    if (($user['role'] ?? '') !== 'admin') {
+        redirect('index.php');
+    }
+}
+
+function flash(string $key, ?string $message = null): ?string
+{
+    if ($message !== null) {
+        $_SESSION['_flash'][$key] = $message;
+        return null;
+    }
+
+    $value = $_SESSION['_flash'][$key] ?? null;
+    unset($_SESSION['_flash'][$key]);
+    return $value;
+}

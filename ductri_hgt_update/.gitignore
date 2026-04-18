@@ -1,0 +1,6 @@
+__pycache__/
+model/__pycache__/
+.venv/
+Result/
+data/*/fold/
+.ipynb_checkpoints/
