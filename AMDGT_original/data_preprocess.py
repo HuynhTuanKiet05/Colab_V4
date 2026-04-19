@@ -137,8 +137,12 @@ def k_fold(data, args):
 def dgl_similarity_graph(data, args):
     drdr_matrix = k_matrix(data['drs'], args.neighbor)
     didi_matrix = k_matrix(data['dis'], args.neighbor)
-    drdr_nx = nx.from_numpy_matrix(drdr_matrix)
-    didi_nx = nx.from_numpy_matrix(didi_matrix)
+    if hasattr(nx, 'from_numpy_array'):
+        drdr_nx = nx.from_numpy_array(drdr_matrix)
+        didi_nx = nx.from_numpy_array(didi_matrix)
+    else:
+        drdr_nx = nx.from_numpy_matrix(drdr_matrix)
+        didi_nx = nx.from_numpy_matrix(didi_matrix)
     drdr_graph = dgl.from_networkx(drdr_nx)
     didi_graph = dgl.from_networkx(didi_nx)
 
