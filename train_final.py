@@ -6,20 +6,24 @@ import torch.optim as optim
 import torch
 import torch.nn as nn
 import torch.nn.functional as fn
-from data_preprocess import *
-from model.RLGHGT import RLGHGT
-from metric import *
+import os
+import gc
 
+# Import from the root modules
+from data_preprocess_improved import get_data, data_processing, k_fold, dgl_similarity_graph, dgl_heterograph
+from model.improved.improved_model import AMNTDDA
+from metric import get_metric
+
+# Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class EarlyStopping:
-    def __init__(self, patience=100, verbose=False, delta=0):
+    def __init__(self, patience=200, verbose=False, delta=0):
         self.patience = patience
         self.verbose = verbose
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_auc_max = -np.Inf
         self.delta = delta
 
     def __call__(self, val_auc):
@@ -40,29 +44,37 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--k_fold', type=int, default=10, help='k-fold cross validation')
     parser.add_argument('--epochs', type=int, default=1000, help='number of epochs to train')
-    parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='weight_decay')
+    parser.add_argument('--lr', type=float, default=0.0005, help='learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight_decay')
     parser.add_argument('--random_seed', type=int, default=1234, help='random seed')
-    parser.add_argument('--neighbor', type=int, default=20, help='neighbor')
+    parser.add_argument('--neighbor', type=int, default=5, help='neighbor (paper optimal k=5)')
     parser.add_argument('--negative_rate', type=float, default=1.0, help='negative_rate')
     parser.add_argument('--dataset', default='C-dataset', help='dataset')
     parser.add_argument('--dropout', default=0.2, type=float, help='dropout')
-    parser.add_argument('--gt_layer', default=2, type=int, help='graph transformer layer')
-    parser.add_argument('--gt_head', default=2, type=int, help='graph transformer head')
-    parser.add_argument('--gt_out_dim', default=200, type=int, help='graph transformer output dimension')
-    parser.add_argument('--hgt_layer', default=3, type=int, help='heterogeneous graph transformer layer')
-    parser.add_argument('--hgt_head', default=8, type=int, help='heterogeneous graph transformer head')
-    parser.add_argument('--hgt_in_dim', default=128, type=int, help='heterogeneous graph transformer input dimension')
-    parser.add_argument('--hgt_head_dim', default=25, type=int, help='heterogeneous graph transformer head dimension')
-    parser.add_argument('--tr_layer', default=2, type=int, help='transformer layer')
-    parser.add_argument('--tr_head', default=4, type=int, help='transformer head')
-    parser.add_argument('--patience', default=100, type=int, help='early stopping patience')
+    
+    # Model dimensions
+    parser.add_argument('--hgt_in_dim', default=128, type=int, help='HGT input dimension (optimized for 4GB GPU)')
+    parser.add_argument('--hgt_layer', default=3, type=int, help='HGT layers')
+    parser.add_argument('--hgt_head', default=8, type=int, help='HGT heads')
+    parser.add_argument('--gt_layer', default=2, type=int, help='GT layers')
+    parser.add_argument('--gt_head', default=2, type=int, help='GT heads')
+    parser.add_argument('--gt_out_dim', default=128, type=int, help='GT output dimension (optimized for 4GB GPU)')
+    parser.add_argument('--tr_layer', default=2, type=int, help='Transformer layers')
+    parser.add_argument('--tr_head', default=4, type=int, help='Transformer heads')
+    
+    parser.add_argument('--patience', default=200, type=int, help='early stopping patience')
 
     args = parser.parse_args()
-    args.data_dir = 'data/' + args.dataset + '/'
-    args.result_dir = 'Result/' + args.dataset + '/RLGHGT_v2/'
+    
+    # Setup directories
+    args.data_dir = 'AMDGT_original/data/' + args.dataset + '/'
+    args.result_dir = 'Result/improved/' + args.dataset + '/'
     os.makedirs(args.result_dir, exist_ok=True)
 
+    print(f"--- Starting Final Improved Pipeline ---")
+    print(f"Dataset: {args.dataset} | LR: {args.lr} | Dim: {args.gt_out_dim} | Neighbor: {args.neighbor}")
+
+    # Data loading
     data = get_data(args)
     args.drug_number = data['drug_number']
     args.disease_number = data['disease_number']
@@ -71,10 +83,12 @@ if __name__ == '__main__':
     data = data_processing(data, args)
     data = k_fold(data, args)
 
+    # Similarity Graphs
     drdr_graph, didi_graph, data = dgl_similarity_graph(data, args)
     drdr_graph = drdr_graph.to(device)
     didi_graph = didi_graph.to(device)
 
+    # Base Features
     drug_feature = torch.FloatTensor(data['drugfeature']).to(device)
     disease_feature = torch.FloatTensor(data['diseasefeature']).to(device)
     protein_feature = torch.FloatTensor(data['proteinfeature']).to(device)
@@ -82,13 +96,12 @@ if __name__ == '__main__':
     Metric_Header = ('Epoch\t\tTime\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc')
     AUCs, AUPRs, Accs, Precs, Recs, F1s, MCCs, Epochs = [], [], [], [], [], [], [], []
 
-    print(f'Training RLGHGT v2 on Dataset: {args.dataset} (Patience: {args.patience})')
-
     for i in range(args.k_fold):
         print(f'\n--- Fold: {i} ---')
         print(Metric_Header)
 
-        model = RLGHGT(args).to(device)
+        # Initialize Improved Model
+        model = AMNTDDA(args).to(device)
         optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
         early_stopping = EarlyStopping(patience=args.patience, verbose=False)
@@ -101,24 +114,33 @@ if __name__ == '__main__':
         X_test = torch.LongTensor(data['X_test'][i]).to(device)
         Y_test = data['Y_test'][i].flatten()
 
-        # Tính toán pos_weight cho Weighted Cross Entropy
+        # Weighting
         n_pos = torch.sum(Y_train).item()
         n_neg = Y_train.numel() - n_pos
-        pos_weight = torch.tensor([n_neg / n_pos]).to(device)
         criterion = nn.CrossEntropyLoss(weight=torch.tensor([1.0, n_neg/n_pos]).to(device))
 
+        # Heterograph with 6 etypes
         drdipr_graph, data = dgl_heterograph(data, data['X_train'][i], args)
         drdipr_graph = drdipr_graph.to(device)
+        
+        # Cleanup memory after building large graph
+        gc.collect()
+        torch.cuda.empty_cache()
 
         start = timeit.default_timer()
 
         for epoch in range(args.epochs):
             model.train()
+            # Forward pass
             _, train_score = model(drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, X_train)
             train_loss = criterion(train_score, torch.flatten(Y_train))
             
             optimizer.zero_grad()
             train_loss.backward()
+            
+            # Gradient Clipping to prevent CUBLAS error 13
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            
             optimizer.step()
             scheduler.step()
 
@@ -152,7 +174,9 @@ if __name__ == '__main__':
             MCCs.append(best_metrics[6]); Epochs.append(best_metrics[7])
             print(f'Fold {i} Best AUC: {best_metrics[0]:.5f} (Epoch {best_metrics[7]})')
         
+        # Proper cleanup
         del model, optimizer, scheduler, drdipr_graph
+        gc.collect()
         torch.cuda.empty_cache()
 
     # Final Results Processing
@@ -167,9 +191,9 @@ if __name__ == '__main__':
     summary_df = pd.DataFrame([['Mean', ''] + metrics_only.mean().tolist(), ['Std', ''] + metrics_only.std().tolist()], columns=results_df.columns)
     final_df = pd.concat([results_df, summary_df], ignore_index=True)
     
-    print('\n' + '='*30 + '\nFINAL RESULTS SUMMARY\n' + '='*30)
+    print('\n' + '='*30 + '\nFINAL RESULTS SUMMARY (IMPROVED PIPELINE)\n' + '='*30)
     print(final_df.iloc[-2:])
     
-    csv_path = os.path.join(args.result_dir, '10_fold_results_RLGHGT_v2.csv')
+    csv_path = os.path.join(args.result_dir, '10_fold_results_improved.csv')
     final_df.to_csv(csv_path, index=False)
-    print(f'\nKết quả v2 đã được lưu tại: {csv_path}')
+    print(f'\nKết quả cải tiến đã được lưu tại: {csv_path}')

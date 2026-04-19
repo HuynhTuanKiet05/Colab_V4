@@ -10,7 +10,7 @@ import dgl
     
 """
 import dgl
-from model.graph_transformer_layer import GraphTransformerLayer
+from .graph_transformer_layer import GraphTransformerLayer
 
 
 class GraphTransformer(nn.Module):
