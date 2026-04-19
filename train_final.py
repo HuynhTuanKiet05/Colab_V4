@@ -143,6 +143,84 @@ def positive_training_edges(x_train, y_train):
     return np.asarray(x_train)[labels == 1]
 
 
+def build_path_prior(data, train_positive_edges, args):
+    drug_n = args.drug_number
+    disease_n = args.disease_number
+    protein_n = args.protein_number
+
+    train_drdi = torch.zeros((drug_n, disease_n), dtype=torch.float32)
+    if len(train_positive_edges) > 0:
+        train_pairs = torch.as_tensor(train_positive_edges, dtype=torch.long)
+        train_drdi[train_pairs[:, 0], train_pairs[:, 1]] = 1.0
+
+    drpr = torch.zeros((drug_n, protein_n), dtype=torch.float32)
+    if data['drpr'].size > 0:
+        drpr_idx = torch.as_tensor(data['drpr'], dtype=torch.long)
+        drpr[drpr_idx[:, 0], drpr_idx[:, 1]] = 1.0
+
+    dipr = torch.zeros((protein_n, disease_n), dtype=torch.float32)
+    if data['dipr'].size > 0:
+        dipr_idx = torch.as_tensor(data['dipr'], dtype=torch.long)
+        dipr[dipr_idx[:, 0], dipr_idx[:, 1]] = 1.0
+
+    shared_paths = drpr @ dipr
+    shared_norm = shared_paths / shared_paths.max().clamp_min(1.0)
+
+    drug_deg = drpr.sum(dim=1, keepdim=True)
+    disease_deg = dipr.sum(dim=0, keepdim=True)
+    degree_mix = torch.sqrt((drug_deg + 1.0) * (disease_deg + 1.0))
+    degree_norm = degree_mix / degree_mix.max().clamp_min(1.0)
+
+    combined_prior = 0.55 * shared_norm + 0.3 * train_drdi + 0.15 * degree_norm
+    return combined_prior
+
+
+def gather_pair_bias(pair_index, prior_matrix, device, scale=0.22):
+    idx = pair_index.long().detach().cpu()
+    bias = prior_matrix[idx[:, 0], idx[:, 1]].to(device)
+    return {'pair_bias': scale * bias.unsqueeze(-1)}
+
+
+def hard_negative_mining_loss(logits, targets, top_ratio=0.25, margin=0.18):
+    probs = fn.softmax(logits, dim=-1)[:, 1]
+    pos_scores = probs[targets == 1]
+    neg_scores = probs[targets == 0]
+    if pos_scores.numel() == 0 or neg_scores.numel() == 0:
+        return logits.new_tensor(0.0)
+
+    top_k = max(1, int(top_ratio * neg_scores.numel()))
+    hard_neg, _ = torch.topk(neg_scores, k=min(top_k, neg_scores.numel()))
+    pos_ref = pos_scores.mean()
+    return torch.relu(margin + hard_neg - pos_ref).mean()
+
+
+def phase_weights(epoch, args):
+    progress = (epoch + 1) / max(1, args.epochs)
+    if progress < 0.65:
+        return {
+            'ranking': args.ranking_weight * 0.8,
+            'contrastive': args.contrastive_weight,
+            'hard_neg': 0.05,
+            'hard_neg_scale': args.hard_negative_weight,
+            'label_smoothing': args.label_smoothing,
+        }
+    if progress < 0.85:
+        return {
+            'ranking': args.ranking_weight,
+            'contrastive': args.contrastive_weight * 0.8,
+            'hard_neg': 0.1,
+            'hard_neg_scale': args.hard_negative_weight * 1.15,
+            'label_smoothing': max(args.label_smoothing * 0.6, 0.002),
+        }
+    return {
+        'ranking': args.ranking_weight * 1.35,
+        'contrastive': args.contrastive_weight * 0.25,
+        'hard_neg': 0.2,
+        'hard_neg_scale': args.hard_negative_weight * 1.4,
+        'label_smoothing': 0.0,
+    }
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--k_fold', type=int, default=10, help='k-fold cross validation')
@@ -257,11 +335,14 @@ if __name__ == '__main__':
         drdipr_graph, data, edge_stats = dgl_heterograph(data, train_positive_edges, args)
         drdipr_graph = drdipr_graph.to(device)
         edge_stats = {k: v.to(device) for k, v in edge_stats.items()}
+        path_prior = build_path_prior(data, train_positive_edges, args).to(device)
 
         start = timeit.default_timer()
 
         for epoch in range(args.epochs):
             model.train()
+            phase = phase_weights(epoch, args)
+            edge_stats['pair_bias'] = edge_stats['pair_bias'] + 0.45 * path_prior[X_train[:, 0], X_train[:, 1]].unsqueeze(-1)
             _, train_score, aux_losses = model(
                 drug_view_graphs,
                 disease_view_graphs,
@@ -281,14 +362,14 @@ if __name__ == '__main__':
                 Y_train,
                 class_weights,
                 focal_objective,
-                args.label_smoothing,
-                args.hard_negative_weight,
+                phase['label_smoothing'],
+                args.hard_negative_weight * phase['hard_neg_scale'],
                 use_focal,
             )
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
+            hard_neg_loss = hard_negative_mining_loss(train_score, Y_train)
             contrastive_loss = aux_losses['contrastive']
-            train_loss = classification_loss + args.ranking_weight * ranking_loss + args.contrastive_weight * contrastive_loss
-            train_loss = train_loss + topology_bonus
+            train_loss = classification_loss + phase['ranking'] * ranking_loss + phase['contrastive'] * contrastive_loss + phase['hard_neg'] * hard_neg_loss
 
             optimizer.zero_grad()
             train_loss.backward()
@@ -322,7 +403,7 @@ if __name__ == '__main__':
                         disease_feature,
                         protein_feature,
                         X_test,
-                        edge_stats=edge_stats,
+                        edge_stats={'pair_bias': edge_stats['pair_bias'][X_test[:, 0], X_test[:, 1]].unsqueeze(-1)},
                     )
                 if backup_state is not None:
                     model.load_state_dict(backup_state, strict=False)
