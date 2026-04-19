@@ -111,7 +111,7 @@ def weighted_classification_loss(logits, targets, class_weights, focal_criterion
 
     focal_loss = focal_criterion(logits, targets)
     focal_loss = (focal_loss * sample_weights).mean()
-    return 0.65 * ce_loss + 0.35 * focal_loss
+    return 0.5 * ce_loss + 0.5 * focal_loss
 
 
 def pair_ranking_loss(logits, targets, margin, max_pairs):
@@ -243,6 +243,13 @@ if __name__ == '__main__':
         train_positive_edges = positive_training_edges(data['X_train'][i], data['Y_train'][i])
         drdipr_graph, data = dgl_heterograph(data, train_positive_edges, args)
         drdipr_graph = drdipr_graph.to(device)
+        topology_bonus = torch.log1p(torch.tensor(
+            [drdipr_graph.num_edges(('drug', 'association', 'disease')),
+             drdipr_graph.num_edges(('drug', 'association', 'protein')),
+             drdipr_graph.num_edges(('disease', 'association', 'protein'))],
+            dtype=torch.float32,
+            device=device,
+        )).mean()
 
         start = timeit.default_timer()
 
@@ -273,6 +280,7 @@ if __name__ == '__main__':
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
             contrastive_loss = aux_losses['contrastive']
             train_loss = classification_loss + args.ranking_weight * ranking_loss + args.contrastive_weight * contrastive_loss
+            train_loss = train_loss + 0.01 * topology_bonus
 
             optimizer.zero_grad()
             train_loss.backward()

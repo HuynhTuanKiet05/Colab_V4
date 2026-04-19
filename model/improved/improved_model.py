@@ -57,8 +57,8 @@ class TokenMixer(nn.Module):
 class PairMixtureOfExperts(nn.Module):
     def __init__(self, dim, dropout):
         super().__init__()
-        pair_dim = dim * 6 + 2
-        gate_dim = dim * 3 + 2
+        pair_dim = dim * 6 + 4
+        gate_dim = dim * 3 + 4
         hidden = max(dim * 3, 256)
         compact = max(dim * 2, 192)
 
@@ -74,8 +74,8 @@ class PairMixtureOfExperts(nn.Module):
             nn.Linear(compact, 2),
         )
         self.expert_local = nn.Sequential(
-            nn.LayerNorm(dim * 3 + 2),
-            nn.Linear(dim * 3 + 2, compact),
+            nn.LayerNorm(dim * 3 + 4),
+            nn.Linear(dim * 3 + 4, compact),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(compact, 2),
@@ -89,20 +89,24 @@ class PairMixtureOfExperts(nn.Module):
         )
         self.skip = nn.Linear(pair_dim, 2)
 
-    def forward(self, drug_repr, disease_repr):
+    def forward(self, drug_repr, disease_repr, topology_score=None):
         pair_mul = drug_repr * disease_repr
         pair_diff = torch.abs(drug_repr - disease_repr)
         pair_sum = drug_repr + disease_repr
         pair_sqdiff = (drug_repr - disease_repr) ** 2
         pair_dot = (drug_repr * disease_repr).sum(dim=-1, keepdim=True)
         pair_cos = F.cosine_similarity(drug_repr, disease_repr, dim=-1).unsqueeze(-1)
+        if topology_score is None:
+            topology_score = torch.zeros_like(pair_dot)
+        fuzzy_close = torch.exp(-pair_diff.mean(dim=-1, keepdim=True))
+        fuzzy_overlap = torch.sigmoid(pair_cos)
 
         full_features = torch.cat(
-            [drug_repr, disease_repr, pair_mul, pair_diff, pair_sum, pair_sqdiff, pair_dot, pair_cos],
+            [drug_repr, disease_repr, pair_mul, pair_diff, pair_sum, pair_sqdiff, pair_dot, pair_cos, topology_score, fuzzy_close],
             dim=-1,
         )
-        local_features = torch.cat([pair_mul, pair_diff, pair_sum, pair_cos, pair_dot], dim=-1)
-        gate_features = torch.cat([pair_mul, pair_diff, pair_sum, pair_cos, pair_dot], dim=-1)
+        local_features = torch.cat([pair_mul, pair_diff, pair_sum, pair_cos, pair_dot, topology_score, fuzzy_close, fuzzy_overlap], dim=-1)
+        gate_features = torch.cat([pair_mul, pair_diff, pair_sum, pair_cos, pair_dot, topology_score, fuzzy_close, fuzzy_overlap], dim=-1)
 
         experts = torch.stack(
             [
@@ -196,6 +200,12 @@ class AMNTDDA(nn.Module):
         self.disease_align_sim = nn.Linear(args.gt_out_dim, align_dim)
         self.disease_align_hgt = nn.Linear(args.gt_out_dim, align_dim)
 
+        self.topology_scorer = nn.Sequential(
+            nn.Linear(args.gt_out_dim * 2, args.gt_out_dim),
+            nn.GELU(),
+            nn.Dropout(args.dropout),
+            nn.Linear(args.gt_out_dim, 1),
+        )
         self.pair_scorer = PairMixtureOfExperts(args.gt_out_dim, args.dropout)
 
     def _prepare_graph_dict(self, graph_input, graph_names):
@@ -261,7 +271,8 @@ class AMNTDDA(nn.Module):
 
         pair_drug = drug_repr[sample[:, 0]]
         pair_disease = disease_repr[sample[:, 1]]
-        output = self.pair_scorer(pair_drug, pair_disease)
+        topology_score = self.topology_scorer(torch.cat([pair_drug, pair_disease], dim=-1))
+        output = self.pair_scorer(pair_drug, pair_disease, topology_score=topology_score)
 
         self.cached_aux = {
             'contrastive': self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_hgt))
@@ -270,6 +281,7 @@ class AMNTDDA(nn.Module):
             'disease_view_weights': disease_view_weights.detach(),
             'drug_token_weights': drug_token_weights.detach(),
             'disease_token_weights': disease_token_weights.detach(),
+            'topology_score': topology_score.detach(),
         }
 
         if return_aux:

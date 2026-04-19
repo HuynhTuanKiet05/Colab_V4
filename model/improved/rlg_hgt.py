@@ -50,7 +50,7 @@ class RLGHGTLayer(nn.Module):
         self.topo_proj = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)) for ntype in self.node_types})
         self.global_proj = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)) for ntype in self.node_types})
         self.meta_gate = nn.ModuleDict({ntype: nn.Sequential(nn.Linear(hidden_dim * 2, hidden_dim), nn.Sigmoid()) for ntype in self.node_types})
-        self.branch_gate = nn.ModuleDict({ntype: nn.Sequential(nn.Linear(hidden_dim * 4, hidden_dim), nn.Sigmoid()) for ntype in self.node_types})
+        self.branch_gate = nn.ModuleDict({ntype: nn.Sequential(nn.Linear(hidden_dim * 4, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 4)) for ntype in self.node_types})
         self.ffn = nn.ModuleDict({
             ntype: nn.Sequential(
                 nn.LayerNorm(hidden_dim),
