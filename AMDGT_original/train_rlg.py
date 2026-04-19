@@ -1,6 +1,5 @@
 import timeit
 import argparse
-import numpy as np
 import pandas as pd
 import torch.optim as optim
 import torch
@@ -11,30 +10,6 @@ from model.RLGHGT import RLGHGT
 from metric import *
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-class EarlyStopping:
-    def __init__(self, patience=100, verbose=False, delta=0):
-        self.patience = patience
-        self.verbose = verbose
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.val_auc_max = -np.Inf
-        self.delta = delta
-
-    def __call__(self, val_auc):
-        score = val_auc
-        if self.best_score is None:
-            self.best_score = score
-        elif score < self.best_score + self.delta:
-            self.counter += 1
-            if self.verbose:
-                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = score
-            self.counter = 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -56,9 +31,11 @@ if __name__ == '__main__':
     parser.add_argument('--hgt_head_dim', default=25, type=int, help='heterogeneous graph transformer head dimension')
     parser.add_argument('--tr_layer', default=2, type=int, help='transformer layer')
     parser.add_argument('--tr_head', default=4, type=int, help='transformer head')
-    parser.add_argument('--patience', default=100, type=int, help='early stopping patience')
+    parser.add_argument('--patience', default=None, type=int, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+    if args.patience is not None:
+        print('Note: --patience is deprecated and ignored; training now runs for the full epoch count.')
     args.data_dir = 'data/' + args.dataset + '/'
     args.result_dir = 'Result/' + args.dataset + '/RLGHGT_v2/'
     os.makedirs(args.result_dir, exist_ok=True)
@@ -82,7 +59,7 @@ if __name__ == '__main__':
     Metric_Header = ('Epoch\t\tTime\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc')
     AUCs, AUPRs, Accs, Precs, Recs, F1s, MCCs, Epochs = [], [], [], [], [], [], [], []
 
-    print(f'Training RLGHGT v2 on Dataset: {args.dataset} (Patience: {args.patience})')
+    print(f'Training RLGHGT v2 on Dataset: {args.dataset}')
 
     for i in range(args.k_fold):
         print(f'\n--- Fold: {i} ---')
@@ -91,7 +68,6 @@ if __name__ == '__main__':
         model = RLGHGT(args).to(device)
         optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-        early_stopping = EarlyStopping(patience=args.patience, verbose=False)
 
         best_auc = 0
         best_metrics = None
@@ -131,20 +107,14 @@ if __name__ == '__main__':
                 test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
 
                 AUC, AUPR, accuracy, precision, recall, f1, mcc = get_metric(Y_test, test_pred, test_prob)
-                
+
                 if AUC > best_auc:
                     best_auc = AUC
                     best_metrics = (AUC, AUPR, accuracy, precision, recall, f1, mcc, epoch + 1)
                     torch.save(model.state_dict(), os.path.join(args.result_dir, f'best_model_fold_{i}.pth'))
-
-                early_stopping(AUC)
                 
                 time_now = timeit.default_timer() - start
                 print(f'{epoch+1}\t\t{time_now:.2f}\t\t{AUC:.5f}\t\t{AUPR:.5f}\t\t{accuracy:.5f}\t\t{precision:.5f}\t\t{recall:.5f}\t\t{f1:.5f}\t\t{mcc:.5f}')
-
-                if early_stopping.early_stop:
-                    print(f"Early stopping at epoch {epoch+1}")
-                    break
 
         if best_metrics:
             AUCs.append(best_metrics[0]); AUPRs.append(best_metrics[1]); Accs.append(best_metrics[2])

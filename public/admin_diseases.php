@@ -42,66 +42,58 @@ $rows = db()->query('SELECT * FROM diseases ORDER BY created_at DESC LIMIT 50')-
 <body>
 <div class="container">
     <div class="navbar">
-        <div class="brand">Admin <span style="font-weight: 300; opacity: 0.6;">Diseases Control</span></div>
+        <div>
+            <div class="brand">Quản lý bệnh lý</div>
+            <div class="muted">Biên soạn thực thể bệnh và mô tả y sinh</div>
+        </div>
         <div class="nav-links">
-            <a class="btn btn-secondary" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);" href="admin.php">Quay lại Quản trị</a>
-            <a class="btn btn-danger" style="background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171;" href="logout.php">Đăng xuất</a>
+            <a class="btn" style="background: rgba(255,255,255,0.06); box-shadow:none;" href="admin.php">Quay lại Quản trị</a>
+            <a class="btn" style="background: rgba(244, 63, 94, 0.16); box-shadow:none;" href="logout.php">Đăng xuất</a>
         </div>
     </div>
 
     <?php if ($success): ?><div class="alert alert-success"><?= e($success) ?></div><?php endif; ?>
 
-    <div class="grid grid-2" style="grid-template-columns: 450px 1fr;">
+    <div class="grid grid-2" style="grid-template-columns: 430px 1fr;">
         <div class="glass-card">
             <h3>Thêm bệnh lý mới</h3>
-            <p class="muted" style="margin-bottom: 20px;">Dữ liệu bệnh lý sẽ được sử dụng trong việc dự đoán liên kết Thuốc-Bệnh.</p>
-            
+            <p class="muted" style="margin-bottom:20px;">Dữ liệu bệnh lý sẽ được dùng trong dự đoán liên kết Thuốc-Bệnh.</p>
             <form method="post">
                 <input type="hidden" name="action" value="create">
-                <div style="display: grid; gap: 16px;">
-                    <div class="form-group">
-                        <label class="label">Mã nguồn (Source Code)</label>
-                        <input class="input" name="source_code" placeholder="Ví dụ: D102100" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="label">Tên bệnh lý</label>
-                        <input class="input" name="name" placeholder="Ví dụ: Lung Cancer" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="label">Mô tả bệnh lý</label>
-                        <textarea class="input" name="description" style="height: 150px; padding: 12px;" placeholder="Thông tin chi tiết về các triệu chứng hoặc mã phân loại..."></textarea>
-                    </div>
-                    <button class="btn" type="submit" style="width: 100%; margin-top: 10px;">Lưu thông tin bệnh lý</button>
+                <div style="display:grid; gap:14px;">
+                    <div class="form-group"><label class="label">Mã nguồn (Source Code)</label><input class="input" name="source_code" placeholder="Ví dụ: D102100" required></div>
+                    <div class="form-group"><label class="label">Tên bệnh lý</label><input class="input" name="name" placeholder="Ví dụ: Lung Cancer" required></div>
+                    <div class="form-group"><label class="label">Mô tả bệnh lý</label><textarea class="input" name="description" placeholder="Thông tin chi tiết về các triệu chứng hoặc mã phân loại..."></textarea></div>
+                    <button class="btn" type="submit" style="width:100%;">Lưu thông tin bệnh lý</button>
                 </div>
             </form>
         </div>
 
         <div class="glass-card">
-            <h3>Danh sách bệnh lý trong CSDL</h3>
-            <div class="table-container" style="max-height: 600px; overflow-y: auto;">
+            <div style="display:flex; justify-content:space-between; align-items:end; margin-bottom:14px; gap:12px; flex-wrap:wrap;">
+                <div>
+                    <h3>Danh sách bệnh lý trong CSDL</h3>
+                    <p class="muted">Tối đa 50 bản ghi gần nhất.</p>
+                </div>
+                <div class="badge badge-disease"><?= count($rows) ?> records</div>
+            </div>
+            <div class="table-container" style="max-height: 620px; overflow-y:auto;">
                 <table class="table">
                     <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Mã nguồn</th>
-                            <th>Tên bệnh lý</th>
-                            <th style="text-align: right;">Hành động</th>
-                        </tr>
+                        <tr><th>ID</th><th>Mã nguồn</th><th>Tên bệnh lý</th><th style="text-align:right;">Hành động</th></tr>
                     </thead>
                     <tbody>
-                    <?php if (empty($rows)): ?>
-                        <tr><td colspan="4" style="text-align: center; padding: 40px;" class="muted">Chưa có dữ liệu bệnh lý</td></tr>
-                    <?php endif; ?>
+                    <?php if (empty($rows)): ?><tr><td colspan="4" style="text-align:center; padding:40px;" class="muted">Chưa có dữ liệu bệnh lý</td></tr><?php endif; ?>
                     <?php foreach ($rows as $row): ?>
                         <tr>
                             <td class="muted">#<?= $row['id'] ?></td>
                             <td><span class="badge badge-disease"><?= e((string) $row['source_code']) ?></span></td>
-                            <td style="font-weight: 600;"><?= e((string) $row['name']) ?></td>
-                            <td style="text-align: right;">
-                                <form method="post" onsubmit="return confirm('Bạn có chắc chắn muốn xóa bệnh lý này? Tất cả các lượt dự đoán liên quan sẽ mất thông tin thực thể này.');" style="display: inline;">
+                            <td style="font-weight:600;"><?= e((string) $row['name']) ?></td>
+                            <td style="text-align:right;">
+                                <form method="post" onsubmit="return confirm('Bạn có chắc chắn muốn xóa bệnh lý này?');" style="display:inline;">
                                     <input type="hidden" name="action" value="delete">
                                     <input type="hidden" name="id" value="<?= e((string) $row['id']) ?>">
-                                    <button class="btn btn-danger" type="submit" style="padding: 6px 12px; font-size: 12px;">Xóa</button>
+                                    <button class="btn" type="submit" style="height:40px; padding:0 14px; background: linear-gradient(135deg, #ef4444, #f97316);">Xóa</button>
                                 </form>
                             </td>
                         </tr>

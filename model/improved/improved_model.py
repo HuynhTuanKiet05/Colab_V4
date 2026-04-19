@@ -4,7 +4,8 @@ import torch.nn as nn
 from AMDGT_original.model import gt_net_drug, gt_net_disease
 from .rlg_hgt import RLGHGT
 
-device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
+# Keep DGL graph execution on CPU for Windows compatibility.
+device = torch.device(os.environ.get('AMDGT_DEVICE', 'cpu'))
 
 
 class AMNTDDA(nn.Module):
@@ -14,6 +15,10 @@ class AMNTDDA(nn.Module):
         self.drug_linear = nn.Linear(300, args.hgt_in_dim)
         self.disease_linear = nn.Linear(64, args.hgt_in_dim)
         self.protein_linear = nn.Linear(320, args.hgt_in_dim)
+        self.drug_norm = nn.LayerNorm(args.hgt_in_dim)
+        self.disease_norm = nn.LayerNorm(args.hgt_in_dim)
+        self.protein_norm = nn.LayerNorm(args.hgt_in_dim)
+        self.input_dropout = nn.Dropout(args.dropout)
         self.hgt_drug_out = nn.Linear(args.hgt_in_dim, args.gt_out_dim)
         self.hgt_disease_out = nn.Linear(args.hgt_in_dim, args.gt_out_dim)
         self.gt_drug = gt_net_drug.GraphTransformer(device, args.gt_layer, args.drug_number, args.gt_out_dim, args.gt_out_dim,
@@ -27,6 +32,8 @@ class AMNTDDA(nn.Module):
 
         self.drug_tr = nn.Transformer(d_model=args.gt_out_dim, nhead=args.tr_head, num_encoder_layers=3, num_decoder_layers=3, batch_first=True)
         self.disease_tr = nn.Transformer(d_model=args.gt_out_dim, nhead=args.tr_head, num_encoder_layers=3, num_decoder_layers=3, batch_first=True)
+        self.fusion_gate_drug = nn.Sequential(nn.Linear(args.gt_out_dim * 2, args.gt_out_dim), nn.Sigmoid())
+        self.fusion_gate_disease = nn.Sequential(nn.Linear(args.gt_out_dim * 2, args.gt_out_dim), nn.Sigmoid())
 
         canonical_etypes = [
             ('drug', 'association', 'disease'),
@@ -51,27 +58,30 @@ class AMNTDDA(nn.Module):
             use_topological=getattr(args, 'use_topological', True),
         )
 
-        self.mlp = nn.Sequential(
-            nn.Linear(args.gt_out_dim * 2, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(1024, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(1024, 256),
-            nn.ReLU(),
-            nn.Dropout(0.4),
+        pair_dim = args.gt_out_dim * 4
+        fused_dim = args.gt_out_dim * 2
+        self.fused_norm_dr = nn.LayerNorm(fused_dim)
+        self.fused_norm_di = nn.LayerNorm(fused_dim)
+        self.pair_norm = nn.LayerNorm(pair_dim)
+        self.residual_mlp = nn.Sequential(
+            nn.Linear(pair_dim, 256),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 256),
+            nn.GELU(),
+            nn.Dropout(0.2),
             nn.Linear(256, 2)
         )
+        self.residual_skip = nn.Linear(pair_dim, 2)
 
 
     def forward(self, drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, sample):
         dr_sim = self.gt_drug(drdr_graph)
         di_sim = self.gt_disease(didi_graph)
 
-        drug_feature = self.drug_linear(drug_feature)
-        disease_feature = self.disease_linear(disease_feature)
-        protein_feature = self.protein_linear(protein_feature)
+        drug_feature = self.input_dropout(self.drug_norm(self.drug_linear(drug_feature)))
+        disease_feature = self.input_dropout(self.disease_norm(self.disease_linear(disease_feature)))
+        protein_feature = self.input_dropout(self.protein_norm(self.protein_linear(protein_feature)))
 
         feature_dict = {
             'drug': drug_feature,
@@ -86,18 +96,24 @@ class AMNTDDA(nn.Module):
         dr_hgt = self.hgt_drug_out(hgt_out['drug'])
         di_hgt = self.hgt_disease_out(hgt_out['disease'])
 
-        dr = torch.stack((dr_sim, dr_hgt), dim=1)
-        di = torch.stack((di_sim, di_hgt), dim=1)
+        dr_gate = self.fusion_gate_drug(torch.cat([dr_sim, dr_hgt], dim=-1))
+        di_gate = self.fusion_gate_disease(torch.cat([di_sim, di_hgt], dim=-1))
+        dr = dr_gate * dr_sim + (1 - dr_gate) * dr_hgt
+        di = di_gate * di_sim + (1 - di_gate) * di_hgt
 
-        dr = self.drug_trans(dr)
-        di = self.disease_trans(di)
+        # Lightweight refinement: keep the fused representation stable and avoid
+        # extra sequence-level autograd state that can be costly on Windows.
+        dr = torch.cat([dr, dr_hgt], dim=-1)
+        di = torch.cat([di, di_hgt], dim=-1)
+        dr = self.fused_norm_dr(dr)
+        di = self.fused_norm_di(di)
 
-        dr = dr.reshape(self.args.drug_number, 2 * self.args.gt_out_dim)
-        di = di.reshape(self.args.disease_number, 2 * self.args.gt_out_dim)
+        pair_mul = torch.mul(dr[sample[:, 0]], di[sample[:, 1]])
+        pair_diff = torch.abs(dr[sample[:, 0]] - di[sample[:, 1]])
+        drdi_embedding = torch.cat([pair_mul, pair_diff], dim=-1)
+        drdi_embedding = self.pair_norm(drdi_embedding)
 
-        drdi_embedding = torch.mul(dr[sample[:, 0]], di[sample[:, 1]])
-
-        output = self.mlp(drdi_embedding)
+        output = self.residual_mlp(drdi_embedding) + self.residual_skip(drdi_embedding)
 
         return dr, output
 

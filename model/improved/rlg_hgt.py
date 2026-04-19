@@ -35,27 +35,29 @@ class RLGHGTLayer(nn.Module):
         self.use_global = use_global
         self.use_topological = use_topological
 
-        self.q_proj = nn.ModuleDict({ntype: nn.Linear(hidden_dim, out_dim) for ntype in self.node_types})
-        self.k_proj = nn.ModuleDict({ntype: nn.Linear(hidden_dim, out_dim) for ntype in self.node_types})
-        self.v_proj = nn.ModuleDict({ntype: nn.Linear(hidden_dim, out_dim) for ntype in self.node_types})
+        self.q_proj = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, out_dim)) for ntype in self.node_types})
+        self.k_proj = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, out_dim)) for ntype in self.node_types})
+        self.v_proj = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, out_dim)) for ntype in self.node_types})
         self.rel_k = nn.Embedding(len(self.canonical_etypes), out_dim)
         self.rel_v = nn.Embedding(len(self.canonical_etypes), out_dim)
         self.rel_bias = nn.Embedding(len(self.canonical_etypes), num_heads)
+        self.rel_scale = nn.Embedding(len(self.canonical_etypes), 1)
 
-        self.meta_q = nn.ModuleDict({ntype: nn.Linear(hidden_dim, hidden_dim) for ntype in self.node_types})
-        self.meta_v = nn.ModuleDict({ntype: nn.Linear(hidden_dim, hidden_dim) for ntype in self.node_types})
+        self.meta_q = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)) for ntype in self.node_types})
+        self.meta_v = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)) for ntype in self.node_types})
 
-        self.out_proj = nn.ModuleDict({ntype: nn.Linear(out_dim, hidden_dim) for ntype in self.node_types})
-        self.topo_proj = nn.ModuleDict({ntype: nn.Linear(hidden_dim, hidden_dim) for ntype in self.node_types})
-        self.global_proj = nn.ModuleDict({ntype: nn.Linear(hidden_dim, hidden_dim) for ntype in self.node_types})
-        self.meta_gate = nn.ModuleDict({ntype: nn.Linear(hidden_dim * 2, hidden_dim) for ntype in self.node_types})
-        self.gate = nn.ModuleDict({ntype: nn.Linear(hidden_dim * 5, hidden_dim) for ntype in self.node_types})
+        self.out_proj = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(out_dim), nn.Linear(out_dim, hidden_dim)) for ntype in self.node_types})
+        self.topo_proj = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)) for ntype in self.node_types})
+        self.global_proj = nn.ModuleDict({ntype: nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)) for ntype in self.node_types})
+        self.meta_gate = nn.ModuleDict({ntype: nn.Sequential(nn.Linear(hidden_dim * 2, hidden_dim), nn.Sigmoid()) for ntype in self.node_types})
+        self.branch_gate = nn.ModuleDict({ntype: nn.Sequential(nn.Linear(hidden_dim * 4, hidden_dim), nn.Sigmoid()) for ntype in self.node_types})
         self.ffn = nn.ModuleDict({
             ntype: nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim * 2),
-                nn.ReLU(),
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim * 4),
+                nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.Linear(hidden_dim * 4, hidden_dim),
             ) for ntype in self.node_types
         })
         self.norm1 = nn.ModuleDict({ntype: nn.LayerNorm(hidden_dim) for ntype in self.node_types})
@@ -71,16 +73,19 @@ class RLGHGTLayer(nn.Module):
                 rk = self.rel_k.weight[rel_id].view(1, self.num_heads, self.head_dim)
                 rv = self.rel_v.weight[rel_id].view(1, self.num_heads, self.head_dim)
                 rel_bias = self.rel_bias.weight[rel_id].view(1, self.num_heads)
+                rel_scale = torch.sigmoid(self.rel_scale.weight[rel_id]).view(1, 1, 1) + 1.0
                 k = k + rk
                 v = v + rv
             else:
                 rel_bias = torch.zeros(1, self.num_heads, device=q.device)
+                rel_scale = 1.0
 
             rel_graph.srcdata['k'] = k
             rel_graph.srcdata['v'] = v
             rel_graph.dstdata['q'] = q
             rel_graph.apply_edges(fn.u_dot_v('k', 'q', 'score'))
             score = rel_graph.edata['score'] / (self.head_dim ** 0.5)
+            score = score * rel_scale
             score = score + rel_bias.view(1, self.num_heads, 1)
             attn = dglf.edge_softmax(rel_graph, score)
             rel_graph.edata['a'] = attn
@@ -138,6 +143,7 @@ class RLGHGTLayer(nn.Module):
             local_out[dsttype] = local_out[dsttype] + self._attn_message(rel_graph, h_dict, srctype, dsttype, rel_id)
 
         new_h = {}
+        layer_w = 1.0
         for ntype in self.node_types:
             local = self.out_proj[ntype](local_out[ntype])
 
@@ -161,21 +167,13 @@ class RLGHGTLayer(nn.Module):
             else:
                 global_ctx = torch.zeros_like(local)
 
-            # Keep ablations clean: disabled branches are removed from the fused local mix
-            # instead of contributing zeros that would rescale the remaining signals.
-            branch_terms = [local]
-            if self.use_metapath:
-                branch_terms.append(meta)
-            if self.use_metapath and self.use_topological:
-                branch_terms.append(topo)
-            branch_mix = torch.stack(branch_terms, dim=0).mean(dim=0)
-            gate_in = torch.cat([h_dict[ntype], local, meta, topo, global_ctx], dim=-1)
-            if self.use_global:
-                gate = torch.sigmoid(self.gate[ntype](gate_in))
-                fused = gate * branch_mix + (1 - gate) * global_ctx
-            else:
-                fused = branch_mix
-            fused = self.norm1[ntype](h_dict[ntype] + self.dropout(fused))
+            # Branch-specific gating with relation/meta/global focus.
+            branch_stack = torch.stack([local, meta, topo, global_ctx], dim=1)
+            branch_gate = self.branch_gate[ntype](torch.cat([local, meta, topo, global_ctx], dim=-1))
+            branch_mix = (branch_gate.unsqueeze(1) * branch_stack).sum(dim=1)
+
+            fused = h_dict[ntype] + layer_w * self.dropout(branch_mix)
+            fused = self.norm1[ntype](fused)
             fused = self.norm2[ntype](fused + self.dropout(self.ffn[ntype](fused)))
             new_h[ntype] = fused
         return new_h

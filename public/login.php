@@ -28,23 +28,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <body>
 <div class="login-wrap">
     <div class="login-box">
-        <h1>Đăng nhập hệ thống</h1>
-        <p class="muted">Website dự đoán liên kết thuốc - bệnh bằng AI</p>
+        <div style="margin-bottom: 20px;">
+            <div class="brand" style="font-size: 28px; display: inline-block; margin-bottom: 10px;">AMNTDDA</div>
+            <h1>Đăng nhập hệ thống</h1>
+            <p class="muted">Nền tảng dự đoán liên kết thuốc - bệnh bằng AI HGT</p>
+        </div>
         <?php if ($error): ?>
             <div class="alert alert-error"><?= e($error) ?></div>
         <?php endif; ?>
         <form method="post">
-            <div style="margin-bottom:12px;">
+            <div style="margin-bottom:14px;">
                 <label>Tên đăng nhập</label>
-                <input class="input" type="text" name="username" required>
+                <input class="input" type="text" name="username" placeholder="Nhập username" required>
             </div>
-            <div style="margin-bottom:16px;">
+            <div style="margin-bottom:18px;">
                 <label>Mật khẩu</label>
-                <input class="input" type="password" name="password" required>
+                <input class="input" type="password" name="password" placeholder="Nhập mật khẩu" required>
             </div>
-            <button class="btn" type="submit">Đăng nhập</button>
+            <button class="btn" type="submit" style="width:100%;">Đăng nhập</button>
         </form>
-        <p class="muted" style="margin-top:16px;">Mặc định: admin / password</p>
+        <div style="margin-top:18px; padding: 14px 16px; border-radius: 16px; background: rgba(96, 165, 250, 0.08); border: 1px solid rgba(96, 165, 250, 0.16);">
+            <p class="muted" style="margin:0;">Mặc định: <strong>admin / password</strong></p>
+        </div>
     </div>
 </div>
 </body>
