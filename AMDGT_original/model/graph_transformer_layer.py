@@ -55,8 +55,8 @@ class MultiHeadAttentionLayer(nn.Module):
 
         # Send weighted values to target nodes
         eids = g.edges()
-        g.send_and_recv(eids, fn.src_mul_edge('V_h', 'score', 'V_h'), fn.sum('V_h', 'wV'))
-        g.send_and_recv(eids, fn.copy_edge('score', 'score'), fn.sum('score', 'z'))
+        g.send_and_recv(eids, fn.u_mul_e('V_h', 'score', 'V_h'), fn.sum('V_h', 'wV'))
+        g.send_and_recv(eids, fn.copy_e('score', 'score'), fn.sum('score', 'z'))
         # Clean temporary edge/node data to prevent autograd reuse across epochs
         for key in ['Q_h', 'K_h', 'V_h', 'score']:
             if key in g.ndata:
