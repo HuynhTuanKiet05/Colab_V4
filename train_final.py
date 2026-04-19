@@ -92,6 +92,17 @@ def build_scheduler(optimizer, args):
     return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
+def update_ema(ema_state, model_state, decay):
+    if ema_state is None:
+        return {k: v.detach().cpu().clone() for k, v in model_state.items()}
+    for key, value in model_state.items():
+        if torch.is_floating_point(value):
+            ema_state[key].mul_(decay).add_(value.detach().cpu(), alpha=1.0 - decay)
+        else:
+            ema_state[key] = value.detach().cpu().clone()
+    return ema_state
+
+
 def weighted_classification_loss(logits, targets, class_weights, focal_criterion, label_smoothing, hard_negative_weight, use_focal):
     probs = fn.softmax(logits.detach(), dim=-1)[:, 1]
     sample_weights = torch.ones_like(probs)
@@ -160,13 +171,14 @@ if __name__ == '__main__':
     parser.add_argument('--ranking_margin', default=0.2, type=float, help='margin used in ranking loss')
     parser.add_argument('--ranking_samples', default=2048, type=int, help='maximum positive-negative pairs used in ranking loss')
     parser.add_argument('--hard_negative_weight', default=2.0, type=float, help='reweight difficult negatives based on current positive score')
-    parser.add_argument('--label_smoothing', default=0.02, type=float, help='label smoothing for cross entropy')
+    parser.add_argument('--label_smoothing', default=0.01, type=float, help='label smoothing for cross entropy')
     parser.add_argument('--patience', default=120, type=int, help=argparse.SUPPRESS)
     parser.add_argument('--target_auc', default=0.96, type=float, help=argparse.SUPPRESS)
     parser.add_argument('--target_auc_warmup', default=400, type=int, help=argparse.SUPPRESS)
     parser.add_argument('--target_auc_patience', default=4, type=int, help=argparse.SUPPRESS)
     parser.add_argument('--plateau_patience', default=3, type=int, help=argparse.SUPPRESS)
     parser.add_argument('--plateau_factor', default=0.5, type=float, help=argparse.SUPPRESS)
+    parser.add_argument('--ema_decay', default=0.995, type=float, help='EMA decay for stable validation snapshots')
 
     parser.add_argument('--hgt_in_dim', default=96, type=int, help='HGT input dimension')
     parser.add_argument('--hgt_layer', default=3, type=int, help='HGT layers')
@@ -228,6 +240,7 @@ if __name__ == '__main__':
         best_auc = -1.0
         best_metrics = None
         best_state_dict = None
+        ema_state_dict = None
 
         X_train = torch.LongTensor(data['X_train'][i]).to(device)
         Y_train = torch.LongTensor(data['Y_train'][i]).to(device).flatten()
@@ -287,6 +300,7 @@ if __name__ == '__main__':
             train_loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
+            ema_state_dict = update_ema(ema_state_dict, model.state_dict(), args.ema_decay)
             scheduler.step()
 
             if (epoch + 1) % args.log_every == 0 or epoch == 0:
@@ -299,6 +313,11 @@ if __name__ == '__main__':
 
             should_score = (epoch + 1) >= args.eval_start_epoch and ((epoch + 1 - args.eval_start_epoch) % max(1, args.score_every) == 0)
             if should_score:
+                eval_state = ema_state_dict if ema_state_dict is not None else None
+                backup_state = None
+                if eval_state is not None:
+                    backup_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    model.load_state_dict(eval_state, strict=False)
                 model.eval()
                 with torch.no_grad():
                     _, test_score = model(
@@ -310,26 +329,35 @@ if __name__ == '__main__':
                         protein_feature,
                         X_test,
                     )
+                if backup_state is not None:
+                    model.load_state_dict(backup_state, strict=False)
 
                 test_prob = fn.softmax(test_score, dim=-1)[:, 1].cpu().numpy()
                 test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
                 AUC, AUPR, accuracy, precision, recall, f1, mcc = get_metric(Y_test, test_pred, test_prob)
+                stable_score = AUC + 0.15 * AUPR + 0.05 * f1
 
-                if AUC > best_auc:
-                    best_auc = AUC
+                if stable_score > best_auc:
+                    best_auc = stable_score
                     best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                     best_metrics = (AUC, AUPR, accuracy, precision, recall, f1, mcc, epoch + 1)
                     torch.save(model.state_dict(), os.path.join(args.result_dir, f'best_model_fold_{i}.pth'))
 
                 time_now = timeit.default_timer() - start
-                best_mark = ' [BEST]' if abs(AUC - best_auc) < 1e-12 else ''
+                best_mark = ' [BEST]' if abs(stable_score - best_auc) < 1e-12 else ''
                 print(
                     f'Epoch {epoch+1:4d} | {time_now:7.2f}s | '
                     f'AUC {AUC:.5f} | AUPR {AUPR:.5f} | ACC {accuracy:.5f} | '
-                    f'P {precision:.5f} | R {recall:.5f} | F1 {f1:.5f} | MCC {mcc:.5f}{best_mark}'
+                    f'P {precision:.5f} | R {recall:.5f} | F1 {f1:.5f} | MCC {mcc:.5f} | '
+                    f'STABLE {stable_score:.5f}{best_mark}'
                 )
 
         if best_metrics is None:
+            eval_state = ema_state_dict if ema_state_dict is not None else None
+            backup_state = None
+            if eval_state is not None:
+                backup_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                model.load_state_dict(eval_state, strict=False)
             model.eval()
             with torch.no_grad():
                 _, test_score = model(
@@ -341,9 +369,12 @@ if __name__ == '__main__':
                     protein_feature,
                     X_test,
                 )
+            if backup_state is not None:
+                model.load_state_dict(backup_state, strict=False)
             test_prob = fn.softmax(test_score, dim=-1)[:, 1].cpu().numpy()
             test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
-            best_metrics = (*get_metric(Y_test, test_pred, test_prob), args.epochs)
+            metrics = get_metric(Y_test, test_pred, test_prob)
+            best_metrics = (*metrics, args.epochs)
             best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
         AUCs.append(best_metrics[0])
@@ -356,6 +387,7 @@ if __name__ == '__main__':
         Epochs.append(best_metrics[7])
         if best_state_dict is not None:
             torch.save(best_state_dict, os.path.join(args.result_dir, f'best_model_fold_{i}_cpu.pth'))
+            torch.save(ema_state_dict if ema_state_dict is not None else best_state_dict, os.path.join(args.result_dir, f'ema_model_fold_{i}.pth'))
         print(f'Fold {i} summary -> best AUC {best_metrics[0]:.5f} at epoch {best_metrics[7]}')
 
         del model, optimizer, scheduler, drdipr_graph
