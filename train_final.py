@@ -200,15 +200,25 @@ def hard_negative_mining_loss(logits, targets, top_ratio=0.15, margin=0.12):
 
 def phase_weights(epoch, args):
     progress = (epoch + 1) / max(1, args.epochs)
-    # Smooth annealing to avoid loss spikes every few epochs.
-    ranking = args.ranking_weight * (0.55 + 0.65 * progress)
-    contrastive = args.contrastive_weight * max(0.2, 1.0 - 0.9 * progress)
-    hard_neg = 0.02 + 0.14 * progress
-    hard_neg_scale = args.hard_negative_weight * (1.0 + 0.25 * progress)
-    if progress < 0.5:
+    warmup_ratio = min(1.0, (epoch + 1) / max(1, args.warmup_epochs))
+    # Keep the first phase classification-only to prevent early loss spikes.
+    if epoch + 1 <= args.warmup_epochs:
+        return {
+            'ranking': 0.0,
+            'contrastive': 0.0,
+            'hard_neg': 0.0,
+            'hard_neg_scale': 1.0,
+            'label_smoothing': args.label_smoothing,
+        }
+    ramp = min(1.0, (progress - (args.warmup_epochs / max(1, args.epochs))) / 0.35)
+    ranking = args.ranking_weight * (0.15 + 0.85 * ramp)
+    contrastive = args.contrastive_weight * max(0.1, 1.0 - 0.85 * ramp)
+    hard_neg = 0.02 + 0.10 * ramp
+    hard_neg_scale = 1.0 + 0.18 * ramp
+    if progress < 0.75:
         label_smoothing = args.label_smoothing
-    elif progress < 0.85:
-        label_smoothing = max(args.label_smoothing * 0.5, 0.002)
+    elif progress < 0.9:
+        label_smoothing = max(args.label_smoothing * 0.5, 0.001)
     else:
         label_smoothing = 0.0
     return {
@@ -425,19 +435,19 @@ if __name__ == '__main__':
                     if args.save_checkpoints:
                         torch.save(model.state_dict(), os.path.join(args.result_dir, f'best_model_fold_{i}.pth'))
                 else:
-                    no_improve_epochs += args.score_every
+                    no_improve_epochs += max(1, args.score_every)
 
                 time_now = timeit.default_timer() - start
                 best_mark = ' [BEST]' if abs(AUC - best_auc) < 1e-12 else ''
-                if no_improve_epochs >= args.patience:
-                    print(f'Early stopping at epoch {epoch+1} after {no_improve_epochs} epochs without AUC improvement.')
-                    break
                 print(
                     f'Epoch {epoch+1:4d} | {time_now:7.2f}s | '
                     f'AUC {AUC:.5f} | AUPR {AUPR:.5f} | ACC {accuracy:.5f} | '
                     f'P {precision:.5f} | R {recall:.5f} | F1 {f1:.5f} | MCC {mcc:.5f} | '
-                    f'STABLE {stable_score:.5f}{best_mark}'
+                    f'STABLE {stable_score:.5f}{best_mark} | NO_IMPROVE {no_improve_epochs}'
                 )
+                if no_improve_epochs >= args.patience:
+                    print(f'Early stopping at epoch {epoch+1} after {no_improve_epochs} epochs without AUC improvement.')
+                    break
 
         if best_metrics is None:
             eval_state = ema_state_dict if ema_state_dict is not None else None
