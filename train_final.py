@@ -369,6 +369,9 @@ if __name__ == '__main__':
                 return_aux=True,
             )
 
+            aux_losses = aux_losses or {}
+            contrastive_loss = aux_losses.get('contrastive', train_score.new_tensor(0.0))
+
             use_focal = (epoch + 1) > args.warmup_epochs
             focal_objective = warm_focal_criterion if use_focal else focal_criterion
             classification_loss = weighted_classification_loss(
@@ -382,7 +385,6 @@ if __name__ == '__main__':
             )
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
             hard_neg_loss = hard_negative_mining_loss(train_score, Y_train)
-            contrastive_loss = aux_losses['contrastive']
             train_loss = classification_loss + phase['ranking'] * ranking_loss + phase['contrastive'] * contrastive_loss + phase['hard_neg'] * hard_neg_loss
 
             optimizer.zero_grad()
@@ -427,7 +429,8 @@ if __name__ == '__main__':
                 AUC, AUPR, accuracy, precision, recall, f1, mcc = get_metric(Y_test, test_pred, test_prob)
                 stable_score = AUC + 0.10 * AUPR + 0.03 * f1
 
-                if AUC > best_auc + 1e-6:
+                improved = AUC > best_auc + 1e-6
+                if improved:
                     best_auc = AUC
                     best_metrics = (AUC, AUPR, accuracy, precision, recall, f1, mcc, epoch + 1)
                     best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -438,7 +441,7 @@ if __name__ == '__main__':
                     no_improve_epochs += max(1, args.score_every)
 
                 time_now = timeit.default_timer() - start
-                best_mark = ' [BEST]' if abs(AUC - best_auc) < 1e-12 else ''
+                best_mark = ' [BEST]' if improved else ''
                 print(
                     f'Epoch {epoch+1:4d} | {time_now:7.2f}s | '
                     f'AUC {AUC:.5f} | AUPR {AUPR:.5f} | ACC {accuracy:.5f} | '
