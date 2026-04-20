@@ -92,9 +92,20 @@ def build_scheduler(optimizer, args):
     return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
+def _smoothstep(x):
+    x = float(max(0.0, min(1.0, x)))
+    return x * x * (3.0 - 2.0 * x)
+
+
+def _ramp(epoch, start, end):
+    if end <= start:
+        return 1.0 if epoch >= end else 0.0
+    return _smoothstep((epoch - start) / (end - start))
+
+
 def compute_phase(epoch, args):
-    progress = (epoch + 1) / max(1, args.epochs)
-    if epoch + 1 <= args.warmup_epochs:
+    step = epoch + 1
+    if step <= args.warmup_epochs:
         return {
             'ranking_weight': 0.0,
             'contrastive_weight': 0.0,
@@ -103,12 +114,30 @@ def compute_phase(epoch, args):
             'use_focal': False,
         }
 
-    ramp = min(1.0, (progress - (args.warmup_epochs / max(1, args.epochs))) / 0.35)
+    # Monotonic schedule only; no cyclic reactivation to avoid periodic loss spikes.
+    progress = step / max(1, args.epochs)
+    warm_end = args.warmup_epochs / max(1, args.epochs)
+
+    ranking_ramp = _ramp(progress, warm_end + 0.05, warm_end + 0.40)
+    contrastive_ramp = _ramp(progress, warm_end + 0.02, warm_end + 0.30)
+    hard_ramp = _ramp(progress, warm_end + 0.20, warm_end + 0.55)
+
+    ranking_weight = args.ranking_weight * ranking_ramp
+    contrastive_weight = args.contrastive_weight * (1.0 - 0.35 * contrastive_ramp)
+    hard_negative_weight = args.hard_negative_weight * (0.15 + 0.85 * hard_ramp)
+
+    if progress < warm_end + 0.30:
+        label_smoothing = args.label_smoothing
+    elif progress < warm_end + 0.60:
+        label_smoothing = max(args.label_smoothing * 0.5, 0.001)
+    else:
+        label_smoothing = 0.0
+
     return {
-        'ranking_weight': args.ranking_weight * (0.15 + 0.85 * ramp),
-        'contrastive_weight': args.contrastive_weight * max(0.1, 1.0 - 0.85 * ramp),
-        'hard_negative_weight': 0.02 + 0.10 * ramp,
-        'label_smoothing': args.label_smoothing if progress < 0.75 else (max(args.label_smoothing * 0.5, 0.001) if progress < 0.9 else 0.0),
+        'ranking_weight': ranking_weight,
+        'contrastive_weight': contrastive_weight,
+        'hard_negative_weight': hard_negative_weight,
+        'label_smoothing': label_smoothing,
         'use_focal': True,
     }
 
@@ -226,34 +255,14 @@ def hard_negative_mining_loss(logits, targets, top_ratio=0.15, margin=0.12):
 
 
 def phase_weights(epoch, args):
-    progress = (epoch + 1) / max(1, args.epochs)
-    warmup_ratio = min(1.0, (epoch + 1) / max(1, args.warmup_epochs))
-    # Keep the first phase classification-only to prevent early loss spikes.
-    if epoch + 1 <= args.warmup_epochs:
-        return {
-            'ranking': 0.0,
-            'contrastive': 0.0,
-            'hard_neg': 0.0,
-            'hard_neg_scale': 1.0,
-            'label_smoothing': args.label_smoothing,
-        }
-    ramp = min(1.0, (progress - (args.warmup_epochs / max(1, args.epochs))) / 0.35)
-    ranking = args.ranking_weight * (0.15 + 0.85 * ramp)
-    contrastive = args.contrastive_weight * max(0.1, 1.0 - 0.85 * ramp)
-    hard_neg = 0.02 + 0.10 * ramp
-    hard_neg_scale = 1.0 + 0.18 * ramp
-    if progress < 0.75:
-        label_smoothing = args.label_smoothing
-    elif progress < 0.9:
-        label_smoothing = max(args.label_smoothing * 0.5, 0.001)
-    else:
-        label_smoothing = 0.0
+    phase = compute_phase(epoch, args)
     return {
-        'ranking': ranking,
-        'contrastive': contrastive,
-        'hard_neg': hard_neg,
-        'hard_neg_scale': hard_neg_scale,
-        'label_smoothing': label_smoothing,
+        'ranking': phase['ranking_weight'],
+        'contrastive': phase['contrastive_weight'],
+        'hard_neg': phase['hard_negative_weight'],
+        'hard_neg_scale': phase['hard_negative_weight'],
+        'label_smoothing': phase['label_smoothing'],
+        'use_focal': phase['use_focal'],
     }
 
 
@@ -274,18 +283,18 @@ if __name__ == '__main__':
     parser.add_argument('--data_root', default=None, help='dataset directory; defaults to AMDGT_original/data/<dataset>')
     parser.add_argument('--result_root', default=None, help='output directory; defaults to Result/improved/<dataset>')
     parser.add_argument('--save_checkpoints', action=argparse.BooleanOptionalAction, default=False, help='save model checkpoints to result_root')
-    parser.add_argument('--warmup_epochs', default=150, type=int, help='epochs to train before enabling focal/ranking-heavy fine-tune')
-    parser.add_argument('--eval_start_epoch', default=50, type=int, help='minimum epochs before evaluation begins')
+    parser.add_argument('--warmup_epochs', default=220, type=int, help='epochs to train before enabling focal/ranking-heavy fine-tune')
+    parser.add_argument('--eval_start_epoch', default=80, type=int, help='minimum epochs before evaluation begins')
     parser.add_argument('--score_every', default=10, type=int, help='evaluate every N epochs after eval start')
     parser.add_argument('--log_every', default=25, type=int, help='print training loss every N epochs')
     parser.add_argument('--focal_gamma', default=1.2, type=float, help='focal loss gamma during early training')
     parser.add_argument('--focal_gamma_warm', default=2.0, type=float, help='focal loss gamma during late training')
     parser.add_argument('--contrastive_weight', default=0.08, type=float, help='weight of node-level cross-view contrastive loss')
-    parser.add_argument('--contrastive_temperature', default=0.2, type=float, help='temperature for contrastive loss')
-    parser.add_argument('--ranking_weight', default=0.12, type=float, help='weight of pairwise ranking loss')
-    parser.add_argument('--ranking_margin', default=0.2, type=float, help='margin used in ranking loss')
+    parser.add_argument('--contrastive_temperature', default=0.20, type=float, help='temperature for contrastive loss')
+    parser.add_argument('--ranking_weight', default=0.08, type=float, help='weight of pairwise ranking loss')
+    parser.add_argument('--ranking_margin', default=0.20, type=float, help='margin used in ranking loss')
     parser.add_argument('--ranking_samples', default=2048, type=int, help='maximum positive-negative pairs used in ranking loss')
-    parser.add_argument('--hard_negative_weight', default=2.0, type=float, help='reweight difficult negatives based on current positive score')
+    parser.add_argument('--hard_negative_weight', default=1.2, type=float, help='reweight difficult negatives based on current positive score')
     parser.add_argument('--label_smoothing', default=0.01, type=float, help='label smoothing for cross entropy')
     parser.add_argument('--patience', default=150, type=int, help='early stopping patience in epochs without AUC improvement')
     parser.add_argument('--target_auc', default=0.96, type=float, help=argparse.SUPPRESS)
@@ -320,6 +329,13 @@ if __name__ == '__main__':
     validate_data_dir(args.data_dir)
     os.makedirs(args.result_dir, exist_ok=True)
 
+    if args.eval_start_epoch <= args.warmup_epochs:
+        args.eval_start_epoch = args.warmup_epochs + 1
+    if args.score_every < 1:
+        args.score_every = 1
+    if args.hard_negative_weight < 0.5:
+        args.hard_negative_weight = 0.5
+
     print('--- Starting Final Improved Pipeline ---')
     print(f'Dataset: {args.dataset} | LR: {args.lr} | Dim: {args.gt_out_dim} | Neighbor: {args.neighbor}')
     print(f'Device: {device} | Data dir: {args.data_dir} | Result dir: {args.result_dir}')
@@ -353,6 +369,8 @@ if __name__ == '__main__':
         optimizer = optim.AdamW(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
         scheduler = build_scheduler(optimizer, args)
         phase = compute_phase(0, args)
+        if args.warmup_epochs >= args.eval_start_epoch:
+            args.eval_start_epoch = args.warmup_epochs + 1
 
         best_auc = -1.0
         best_metrics = None
@@ -382,8 +400,9 @@ if __name__ == '__main__':
         for epoch in range(args.epochs):
             model.train()
             phase = compute_phase(epoch, args)
+            phase_scale = 0.30 if epoch + 1 <= args.warmup_epochs else 0.40 + 0.15 * _smoothstep((epoch + 1 - args.warmup_epochs) / max(1, args.epochs - args.warmup_epochs))
             train_edge_stats = {
-                'pair_bias': edge_stats['pair_bias'] + gather_pair_bias(X_train, path_prior, device, scale=0.45)
+                'pair_bias': edge_stats['pair_bias'] + gather_pair_bias(X_train, path_prior, device, scale=phase_scale)
             }
             _, train_score, aux_losses = model(
                 drug_view_graphs,
@@ -408,12 +427,12 @@ if __name__ == '__main__':
                 class_weights,
                 focal_objective,
                 phase['label_smoothing'],
-                args.hard_negative_weight * phase['hard_negative_weight'],
+                min(phase['hard_negative_weight'], 1.0),
                 use_focal,
             )
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
             hard_neg_loss = hard_negative_mining_loss(train_score, Y_train)
-            train_loss = classification_loss + phase['ranking_weight'] * ranking_loss + phase['contrastive_weight'] * contrastive_loss + phase['hard_negative_weight'] * hard_neg_loss
+            train_loss = classification_loss + phase['ranking_weight'] * ranking_loss + phase['contrastive_weight'] * contrastive_loss + 0.25 * phase['hard_negative_weight'] * hard_neg_loss
 
             optimizer.zero_grad()
             train_loss.backward()

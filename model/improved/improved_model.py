@@ -32,38 +32,42 @@ class MultiViewFusion(nn.Module):
         return self.out_norm(fused), weights
 
 
-class TokenMixer(nn.Module):
-    def __init__(self, dim, num_tokens, num_heads, num_layers, dropout):
+class TopologyGate(nn.Module):
+    def __init__(self, dim, dropout):
         super().__init__()
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=dim,
-            nhead=num_heads,
-            dropout=dropout,
-            activation='gelu',
-            batch_first=True,
+        self.project = nn.Sequential(
+            nn.LayerNorm(dim * 2),
+            nn.Linear(dim * 2, dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim),
         )
-        self.token_embeddings = nn.Parameter(torch.randn(num_tokens, dim) * 0.02)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.pool = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, 1))
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim * 3),
+            nn.Linear(dim * 3, dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim),
+            nn.Sigmoid(),
+        )
         self.out_norm = nn.LayerNorm(dim)
 
-    def forward(self, tokens):
-        mixed = self.encoder(tokens + self.token_embeddings.unsqueeze(0))
-        weights = torch.softmax(self.pool(mixed).squeeze(-1), dim=1)
-        pooled = (weights.unsqueeze(-1) * mixed).sum(dim=1)
-        return self.out_norm(pooled), weights
+    def forward(self, sim_repr, hgt_repr):
+        topo_repr = self.project(torch.cat([sim_repr, hgt_repr], dim=-1))
+        gate = self.net(torch.cat([sim_repr, hgt_repr, topo_repr], dim=-1))
+        fused = sim_repr + gate * (hgt_repr + topo_repr - sim_repr)
+        return self.out_norm(fused), gate, topo_repr
 
 
-class PairMixtureOfExperts(nn.Module):
+class PairScorer(nn.Module):
     def __init__(self, dim, dropout):
         super().__init__()
         pair_dim = dim * 6 + 4
-        gate_dim = dim * 3 + 5
         hidden = max(dim * 3, 256)
         compact = max(dim * 2, 192)
 
         self.bilinear = nn.Bilinear(dim, dim, 2)
-        self.expert_main = nn.Sequential(
+        self.main = nn.Sequential(
             nn.LayerNorm(pair_dim),
             nn.Linear(pair_dim, hidden),
             nn.GELU(),
@@ -73,22 +77,8 @@ class PairMixtureOfExperts(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(compact, 2),
         )
-        self.expert_local = nn.Sequential(
-            nn.LayerNorm(dim * 3 + 5),
-            nn.Linear(dim * 3 + 5, compact),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(compact, 2),
-        )
-        self.gate = nn.Sequential(
-            nn.LayerNorm(gate_dim),
-            nn.Linear(gate_dim, compact),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(compact, 3),
-        )
-        self.topology_scale = nn.Parameter(torch.tensor(1.0))
         self.skip = nn.Linear(pair_dim, 2)
+        self.topology_scale = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, drug_repr, disease_repr, topology_score=None):
         pair_mul = drug_repr * disease_repr
@@ -101,30 +91,20 @@ class PairMixtureOfExperts(nn.Module):
             topology_score = torch.zeros_like(pair_dot)
         topology_score = self.topology_scale * topology_score
         fuzzy_close = torch.exp(-pair_diff.mean(dim=-1, keepdim=True))
-        fuzzy_overlap = torch.sigmoid(pair_cos)
 
-        full_features = torch.cat(
-            [drug_repr, disease_repr, pair_mul, pair_diff, pair_sum, pair_sqdiff, pair_dot, pair_cos, topology_score, fuzzy_close],
-            dim=-1,
-        )
-        local_features = torch.cat([pair_mul, pair_diff, pair_sum, pair_cos, pair_dot, topology_score, fuzzy_close, fuzzy_overlap], dim=-1)
-        gate_features = torch.cat([pair_mul, pair_diff, pair_sum, pair_cos, pair_dot, topology_score, fuzzy_close, fuzzy_overlap], dim=-1)
+        full_features = torch.cat([
+            drug_repr, disease_repr, pair_mul, pair_diff, pair_sum, pair_sqdiff, pair_dot, pair_cos, topology_score, fuzzy_close
+        ], dim=-1)
+        local_features = torch.cat([pair_mul, pair_diff, pair_sum, pair_cos, pair_dot, topology_score, fuzzy_close], dim=-1)
 
-        experts = torch.stack(
-            [
-                self.bilinear(drug_repr, disease_repr),
-                self.expert_main(full_features),
-                self.expert_local(local_features),
-            ],
-            dim=1,
-        )
-        weights = torch.softmax(self.gate(gate_features), dim=-1).unsqueeze(-1)
-        return (weights * experts).sum(dim=1) + self.skip(full_features)
+        score_main = self.main(full_features)
+        score_bilinear = self.bilinear(drug_repr, disease_repr)
+        return 0.6 * score_main + 0.4 * score_bilinear + self.skip(full_features)
 
 
 class AMNTDDA(nn.Module):
     def __init__(self, args):
-        super(AMNTDDA, self).__init__()
+        super().__init__()
         self.args = args
         self.runtime_device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
         self.drug_feature_dim = 300
@@ -177,24 +157,10 @@ class AMNTDDA(nn.Module):
 
         self.hgt_drug_out = nn.Sequential(nn.Linear(args.hgt_in_dim, args.gt_out_dim), nn.LayerNorm(args.gt_out_dim))
         self.hgt_disease_out = nn.Sequential(nn.Linear(args.hgt_in_dim, args.gt_out_dim), nn.LayerNorm(args.gt_out_dim))
-        self.drug_raw_context = nn.Sequential(
-            nn.Linear(self.drug_feature_dim, args.gt_out_dim),
-            nn.LayerNorm(args.gt_out_dim),
-            nn.GELU(),
-            nn.Dropout(args.dropout),
-        )
-        self.disease_raw_context = nn.Sequential(
-            nn.Linear(self.disease_feature_dim, args.gt_out_dim),
-            nn.LayerNorm(args.gt_out_dim),
-            nn.GELU(),
-            nn.Dropout(args.dropout),
-        )
-
-        mix_heads = _valid_num_heads(args.gt_out_dim, args.tr_head)
         self.drug_view_fusion = MultiViewFusion(args.gt_out_dim, args.dropout)
         self.disease_view_fusion = MultiViewFusion(args.gt_out_dim, args.dropout)
-        self.drug_token_mixer = TokenMixer(args.gt_out_dim, num_tokens=4, num_heads=mix_heads, num_layers=args.tr_layer, dropout=args.dropout)
-        self.disease_token_mixer = TokenMixer(args.gt_out_dim, num_tokens=4, num_heads=mix_heads, num_layers=args.tr_layer, dropout=args.dropout)
+        self.drug_topology_gate = TopologyGate(args.gt_out_dim, args.dropout)
+        self.disease_topology_gate = TopologyGate(args.gt_out_dim, args.dropout)
 
         align_dim = min(max(args.gt_out_dim // 2, 64), 256)
         self.drug_align_sim = nn.Linear(args.gt_out_dim, align_dim)
@@ -208,8 +174,8 @@ class AMNTDDA(nn.Module):
             nn.Dropout(args.dropout),
             nn.Linear(args.gt_out_dim, 1),
         )
-        self.topology_scale = nn.Parameter(torch.tensor(0.15))
-        self.pair_scorer = PairMixtureOfExperts(args.gt_out_dim, args.dropout)
+        self.topology_scale = nn.Parameter(torch.tensor(0.25))
+        self.pair_scorer = PairScorer(args.gt_out_dim, args.dropout)
 
     def _prepare_graph_dict(self, graph_input, graph_names):
         if isinstance(graph_input, dict):
@@ -243,9 +209,6 @@ class AMNTDDA(nn.Module):
         drug_view_fused, drug_view_weights = self.drug_view_fusion(drug_view_stack)
         disease_view_fused, disease_view_weights = self.disease_view_fusion(disease_view_stack)
 
-        raw_drug_token = self.drug_raw_context(drug_feature)
-        raw_disease_token = self.disease_raw_context(disease_feature)
-
         hgt_drug_feature = self.input_dropout(self.drug_norm(self.drug_linear(drug_feature)))
         hgt_disease_feature = self.input_dropout(self.disease_norm(self.disease_linear(disease_feature)))
         hgt_protein_feature = self.input_dropout(self.protein_norm(self.protein_linear(protein_feature)))
@@ -261,19 +224,11 @@ class AMNTDDA(nn.Module):
         drug_hgt = self.hgt_drug_out(hgt_out['drug'])
         disease_hgt = self.hgt_disease_out(hgt_out['disease'])
 
-        drug_tokens = torch.stack(
-            [drug_views['fingerprint'], drug_views['gip'], drug_hgt, raw_drug_token],
-            dim=1,
-        )
-        disease_tokens = torch.stack(
-            [disease_views['phenotype'], disease_views['gip'], disease_hgt, raw_disease_token],
-            dim=1,
-        )
-        drug_repr, drug_token_weights = self.drug_token_mixer(drug_tokens)
-        disease_repr, disease_token_weights = self.disease_token_mixer(disease_tokens)
+        drug_topo, drug_gate, drug_topo_repr = self.drug_topology_gate(drug_view_fused, drug_hgt)
+        disease_topo, disease_gate, disease_topo_repr = self.disease_topology_gate(disease_view_fused, disease_hgt)
 
-        pair_drug = drug_repr[sample[:, 0]]
-        pair_disease = disease_repr[sample[:, 1]]
+        pair_drug = drug_topo[sample[:, 0]]
+        pair_disease = disease_topo[sample[:, 1]]
         topology_score = self.topology_scale * torch.tanh(self.topology_scorer(torch.cat([pair_drug, pair_disease], dim=-1)))
         edge_bias = torch.zeros_like(topology_score)
         if edge_stats is not None:
@@ -281,19 +236,24 @@ class AMNTDDA(nn.Module):
         pair_topology = topology_score + edge_bias
         output = self.pair_scorer(pair_drug, pair_disease, topology_score=pair_topology)
 
+        topology_align = self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_topo_repr))
+        topology_align = topology_align + self._contrastive_loss(self.disease_align_sim(disease_view_fused), self.disease_align_hgt(disease_topo_repr))
+
         self.cached_aux = {
             'contrastive': self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_hgt))
-            + self._contrastive_loss(self.disease_align_sim(disease_view_fused), self.disease_align_hgt(disease_hgt)),
+            + self._contrastive_loss(self.disease_align_sim(disease_view_fused), self.disease_align_hgt(disease_hgt))
+            + 0.5 * topology_align,
             'drug_view_weights': drug_view_weights.detach(),
             'disease_view_weights': disease_view_weights.detach(),
-            'drug_token_weights': drug_token_weights.detach(),
-            'disease_token_weights': disease_token_weights.detach(),
+            'drug_gate_mean': float(drug_gate.mean().item()),
+            'disease_gate_mean': float(disease_gate.mean().item()),
             'topology_score': pair_topology.detach(),
             'edge_bias': edge_bias.detach(),
-            'drug_repr_norm': torch.norm(drug_repr, dim=-1).mean().detach(),
-            'disease_repr_norm': torch.norm(disease_repr, dim=-1).mean().detach(),
+            'drug_repr_norm': torch.norm(drug_topo, dim=-1).mean().detach(),
+            'disease_repr_norm': torch.norm(disease_topo, dim=-1).mean().detach(),
+            'pair_topology_mean': pair_topology.mean().detach(),
         }
 
         if return_aux:
-            return drug_repr, output, self.cached_aux
-        return drug_repr, output
+            return drug_topo, output, self.cached_aux
+        return drug_topo, output
