@@ -86,6 +86,9 @@ def data_processing(data, args):
     drs_mean = (data['drf'] + data['drg']) / 2
     dis_mean = (data['dip'] + data['dig']) / 2
 
+    # Keep consensus views consistent with the reference pipeline:
+    #  - when one view is zero, fall back to the other similarity view
+    #  - otherwise use the arithmetic mean
     drs = np.where(data['drf'] == 0, data['drg'], drs_mean)
     dis = np.where(data['dip'] == 0, data['dig'], dis_mean)
 

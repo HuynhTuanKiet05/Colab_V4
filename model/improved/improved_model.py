@@ -99,6 +99,7 @@ class PairMixtureOfExperts(nn.Module):
         pair_cos = F.cosine_similarity(drug_repr, disease_repr, dim=-1).unsqueeze(-1)
         if topology_score is None:
             topology_score = torch.zeros_like(pair_dot)
+        topology_score = self.topology_scale * topology_score
         fuzzy_close = torch.exp(-pair_diff.mean(dim=-1, keepdim=True))
         fuzzy_overlap = torch.sigmoid(pair_cos)
 
@@ -192,8 +193,8 @@ class AMNTDDA(nn.Module):
         mix_heads = _valid_num_heads(args.gt_out_dim, args.tr_head)
         self.drug_view_fusion = MultiViewFusion(args.gt_out_dim, args.dropout)
         self.disease_view_fusion = MultiViewFusion(args.gt_out_dim, args.dropout)
-        self.drug_token_mixer = TokenMixer(args.gt_out_dim, num_tokens=5, num_heads=mix_heads, num_layers=args.tr_layer, dropout=args.dropout)
-        self.disease_token_mixer = TokenMixer(args.gt_out_dim, num_tokens=5, num_heads=mix_heads, num_layers=args.tr_layer, dropout=args.dropout)
+        self.drug_token_mixer = TokenMixer(args.gt_out_dim, num_tokens=4, num_heads=mix_heads, num_layers=args.tr_layer, dropout=args.dropout)
+        self.disease_token_mixer = TokenMixer(args.gt_out_dim, num_tokens=4, num_heads=mix_heads, num_layers=args.tr_layer, dropout=args.dropout)
 
         align_dim = min(max(args.gt_out_dim // 2, 64), 256)
         self.drug_align_sim = nn.Linear(args.gt_out_dim, align_dim)
@@ -261,11 +262,11 @@ class AMNTDDA(nn.Module):
         disease_hgt = self.hgt_disease_out(hgt_out['disease'])
 
         drug_tokens = torch.stack(
-            [drug_views['fingerprint'], drug_views['gip'], drug_views['consensus'], drug_hgt, raw_drug_token],
+            [drug_views['fingerprint'], drug_views['gip'], drug_hgt, raw_drug_token],
             dim=1,
         )
         disease_tokens = torch.stack(
-            [disease_views['phenotype'], disease_views['gip'], disease_views['consensus'], disease_hgt, raw_disease_token],
+            [disease_views['phenotype'], disease_views['gip'], disease_hgt, raw_disease_token],
             dim=1,
         )
         drug_repr, drug_token_weights = self.drug_token_mixer(drug_tokens)
@@ -277,7 +278,8 @@ class AMNTDDA(nn.Module):
         edge_bias = torch.zeros_like(topology_score)
         if edge_stats is not None:
             edge_bias = edge_stats.get('pair_bias', edge_bias)
-        output = self.pair_scorer(pair_drug, pair_disease, topology_score=topology_score + edge_bias)
+        pair_topology = topology_score + edge_bias
+        output = self.pair_scorer(pair_drug, pair_disease, topology_score=pair_topology)
 
         self.cached_aux = {
             'contrastive': self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_hgt))
@@ -286,8 +288,10 @@ class AMNTDDA(nn.Module):
             'disease_view_weights': disease_view_weights.detach(),
             'drug_token_weights': drug_token_weights.detach(),
             'disease_token_weights': disease_token_weights.detach(),
-            'topology_score': topology_score.detach(),
+            'topology_score': pair_topology.detach(),
             'edge_bias': edge_bias.detach(),
+            'drug_repr_norm': torch.norm(drug_repr, dim=-1).mean().detach(),
+            'disease_repr_norm': torch.norm(disease_repr, dim=-1).mean().detach(),
         }
 
         if return_aux:

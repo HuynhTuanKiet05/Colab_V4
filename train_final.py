@@ -92,6 +92,27 @@ def build_scheduler(optimizer, args):
     return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
+def compute_phase(epoch, args):
+    progress = (epoch + 1) / max(1, args.epochs)
+    if epoch + 1 <= args.warmup_epochs:
+        return {
+            'ranking_weight': 0.0,
+            'contrastive_weight': 0.0,
+            'hard_negative_weight': 0.0,
+            'label_smoothing': args.label_smoothing,
+            'use_focal': False,
+        }
+
+    ramp = min(1.0, (progress - (args.warmup_epochs / max(1, args.epochs))) / 0.35)
+    return {
+        'ranking_weight': args.ranking_weight * (0.15 + 0.85 * ramp),
+        'contrastive_weight': args.contrastive_weight * max(0.1, 1.0 - 0.85 * ramp),
+        'hard_negative_weight': 0.02 + 0.10 * ramp,
+        'label_smoothing': args.label_smoothing if progress < 0.75 else (max(args.label_smoothing * 0.5, 0.001) if progress < 0.9 else 0.0),
+        'use_focal': True,
+    }
+
+
 def update_ema(ema_state, model_state, decay):
     if ema_state is None:
         return {k: v.detach().cpu().clone() for k, v in model_state.items()}
@@ -123,6 +144,12 @@ def weighted_classification_loss(logits, targets, class_weights, focal_criterion
     focal_loss = focal_criterion(logits, targets)
     focal_loss = (focal_loss * sample_weights).mean()
     return 0.5 * ce_loss + 0.5 * focal_loss
+
+
+def contrastive_alignment_loss(aux_losses):
+    if not aux_losses:
+        return None
+    return aux_losses.get('contrastive', None)
 
 
 def pair_ranking_loss(logits, targets, margin, max_pairs):
@@ -325,6 +352,7 @@ if __name__ == '__main__':
         model = AMNTDDA(args).to(device)
         optimizer = optim.AdamW(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
         scheduler = build_scheduler(optimizer, args)
+        phase = compute_phase(0, args)
 
         best_auc = -1.0
         best_metrics = None
@@ -353,7 +381,7 @@ if __name__ == '__main__':
 
         for epoch in range(args.epochs):
             model.train()
-            phase = phase_weights(epoch, args)
+            phase = compute_phase(epoch, args)
             train_edge_stats = {
                 'pair_bias': edge_stats['pair_bias'] + gather_pair_bias(X_train, path_prior, device, scale=0.45)
             }
@@ -372,7 +400,7 @@ if __name__ == '__main__':
             aux_losses = aux_losses or {}
             contrastive_loss = aux_losses.get('contrastive', train_score.new_tensor(0.0))
 
-            use_focal = (epoch + 1) > args.warmup_epochs
+            use_focal = phase['use_focal']
             focal_objective = warm_focal_criterion if use_focal else focal_criterion
             classification_loss = weighted_classification_loss(
                 train_score,
@@ -380,12 +408,12 @@ if __name__ == '__main__':
                 class_weights,
                 focal_objective,
                 phase['label_smoothing'],
-                args.hard_negative_weight * phase['hard_neg_scale'],
+                args.hard_negative_weight * phase['hard_negative_weight'],
                 use_focal,
             )
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
             hard_neg_loss = hard_negative_mining_loss(train_score, Y_train)
-            train_loss = classification_loss + phase['ranking'] * ranking_loss + phase['contrastive'] * contrastive_loss + phase['hard_neg'] * hard_neg_loss
+            train_loss = classification_loss + phase['ranking_weight'] * ranking_loss + phase['contrastive_weight'] * contrastive_loss + phase['hard_negative_weight'] * hard_neg_loss
 
             optimizer.zero_grad()
             train_loss.backward()
