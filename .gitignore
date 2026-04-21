@@ -20,7 +20,7 @@ Thumbs.db
 *.log
 
 # Database Config (Sensitive)
-app/config.php
+app/config.local.php
 
 # Large AI Models / Data
 *.pth

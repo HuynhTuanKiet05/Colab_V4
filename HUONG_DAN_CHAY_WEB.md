@@ -51,7 +51,8 @@ Frontend cung cấp giao diện người dùng và quản lý dữ liệu lịch
 ## 🗄️ Bước 3: Cấu hình Cơ sở dữ liệu (Nếu cần)
 
 Nếu bạn thay đổi mật khẩu hoặc tên DB, hãy cập nhật tại:
-*   File: `app/config.php`
+*   File ưu tiên: `app/config.local.php`
+*   File mẫu để copy: `app/config.example.php`
 
 ---
 

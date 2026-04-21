@@ -1,135 +1,306 @@
 from __future__ import annotations
 
+import csv
 import os
 import sys
-import csv
-import torch
-import torch.nn.functional as fn
-import dgl
+from pathlib import Path
+from typing import Dict, List
+
 import numpy as np
 import pandas as pd
-from typing import Any, Dict, List
+import torch
+import torch.nn.functional as fn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-# Thêm đường dẫn gốc để import được model và data_preprocess
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-sys.path.append(PROJECT_ROOT)
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+sys.path.append(str(PROJECT_ROOT))
 
 from model.AMNTDDA import AMNTDDA
+from topology_features import extract_topology_features
 
-# Chọn Preprocess phù hợp với Version mô hình
 if os.environ.get('HGT_MODEL_VERSION', 'improved') == 'improved':
-    from data_preprocess_improved import get_adj, k_matrix, dgl_similarity_graph, dgl_heterograph
+    from data_preprocess_improved import dgl_similarity_graph, dgl_heterograph
 else:
-    from AMDGT_original.data_preprocess import get_adj, k_matrix, dgl_similarity_graph, dgl_heterograph
+    from AMDGT_original.data_preprocess import dgl_similarity_graph, dgl_heterograph
 
 app = FastAPI(title='HGT Drug-Disease Prediction API', version='2.0.0')
 
-# Cấu hình thiết bị
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
 print(f"Using device: {device}")
+
 
 class PredictRequest(BaseModel):
     query_type: str = Field(pattern='^(drug_to_disease|disease_to_drug)$')
     input_text: str
     top_k: int = 10
-    dataset: str = 'C-dataset' # Mặc định là C-dataset, có thể truyền B-dataset hoặc F-dataset
+    dataset: str = 'C-dataset'
+
+
+DATASET_PRESETS = {
+    'B-dataset': {
+        'neighbor': 3,
+        'gt_out_dim': 512,
+        'hgt_in_dim': 512,
+        'hgt_layer': 2,
+        'hgt_head': 8,
+        'hgt_head_dim': 64,
+        'topo_hidden': 192,
+    },
+    'C-dataset': {
+        'neighbor': 5,
+        'gt_out_dim': 256,
+        'hgt_in_dim': 256,
+        'hgt_layer': 2,
+        'hgt_head': 8,
+        'hgt_head_dim': 32,
+        'topo_hidden': 128,
+    },
+    'F-dataset': {
+        'neighbor': 5,
+        'gt_out_dim': 256,
+        'hgt_in_dim': 256,
+        'hgt_layer': 2,
+        'hgt_head': 8,
+        'hgt_head_dim': 32,
+        'topo_hidden': 128,
+    },
+}
+
 
 class InferenceManager:
     def __init__(self):
-        self.cached_models = {}
-        self.cached_data = {}
+        self.cached_models: Dict[str, torch.nn.Module] = {}
+        self.cached_data: Dict[str, Dict[str, object]] = {}
 
     def get_dataset_paths(self, dataset_name: str):
-        data_dir = os.path.join(PROJECT_ROOT, 'AMDGT_original', 'data', dataset_name, '')
-        model_path = os.path.join(PROJECT_ROOT, 'Result', dataset_name, 'AMNTDDA', 'best_model.pth')
+        data_dir = PROJECT_ROOT / 'AMDGT_original' / 'data' / dataset_name
+        model_path = self.resolve_model_path(dataset_name)
         return data_dir, model_path
+
+    def resolve_model_path(self, dataset_name: str) -> Path | None:
+        candidate_roots = [
+            PROJECT_ROOT / 'Result' / 'improved' / dataset_name,
+            PROJECT_ROOT / 'Result' / dataset_name,
+        ]
+        candidates: List[Path] = []
+        for root in candidate_roots:
+            if not root.exists():
+                continue
+            candidates.extend(root.rglob('best_model*.pth'))
+
+        if not candidates:
+            legacy_path = PROJECT_ROOT / 'Result' / dataset_name / 'AMNTDDA' / 'best_model.pth'
+            return legacy_path if legacy_path.exists() else None
+
+        candidates.sort(key=lambda path: ('fold' in path.stem.lower(), -path.stat().st_mtime))
+        return candidates[0]
+
+    @staticmethod
+    def load_csv(path: Path) -> List[Dict[str, str]]:
+        if not path.exists():
+            return []
+        with path.open('r', encoding='utf-8', newline='') as handle:
+            return list(csv.DictReader(handle))
+
+    @staticmethod
+    def load_node_ids(data_dir: Path) -> List[str]:
+        for filename in ('AllNode.csv', 'Allnode.csv'):
+            path = data_dir / filename
+            if not path.exists():
+                continue
+            frame = pd.read_csv(path, header=None)
+            values = frame.iloc[:, -1].astype(str).str.strip()
+            return [value for value in values if value and value.lower() not in {'id', 'nan'}]
+        return []
+
+    def load_drug_info(self, data_dir: Path, fallback_count: int) -> List[Dict[str, str]]:
+        rows = self.load_csv(data_dir / 'DrugInformation.csv')
+        if rows:
+            return [
+                {
+                    'id': str(row.get('id') or row.get('drug_id') or index),
+                    'name': str(row.get('name') or row.get('drug_name') or row.get('id') or index),
+                    'smiles': str(row.get('smiles') or ''),
+                }
+                for index, row in enumerate(rows)
+            ]
+        return [{'id': f'DRUG_{index}', 'name': f'DRUG_{index}'} for index in range(fallback_count)]
+
+    def load_disease_info(self, data_dir: Path, drug_count: int, disease_count: int) -> List[Dict[str, str]]:
+        rows = self.load_csv(data_dir / 'DiseaseInformation.csv')
+        if rows:
+            return [
+                {
+                    'id': str(row.get('id') or row.get('disease_id') or index),
+                    'name': str(row.get('name') or row.get('disease_name') or row.get('id') or index),
+                }
+                for index, row in enumerate(rows)
+            ]
+
+        node_ids = self.load_node_ids(data_dir)
+        disease_ids = node_ids[drug_count:drug_count + disease_count]
+        if len(disease_ids) < disease_count:
+            disease_ids.extend(f'DISEASE_{index}' for index in range(len(disease_ids), disease_count))
+        return [{'id': disease_id, 'name': disease_id} for disease_id in disease_ids[:disease_count]]
+
+    def load_protein_info(self, data_dir: Path, protein_count: int) -> List[Dict[str, str]]:
+        rows = self.load_csv(data_dir / 'ProteinInformation.csv')
+        if rows:
+            return [
+                {
+                    'id': str(row.get('id') or row.get('protein_id') or index),
+                    'name': str(row.get('protein_name') or row.get('name') or row.get('id') or index),
+                    'protein_name': str(row.get('protein_name') or row.get('name') or row.get('id') or index),
+                    'sequence': str(row.get('sequence') or ''),
+                }
+                for index, row in enumerate(rows)
+            ]
+        return [{'id': f'PROTEIN_{index}', 'name': f'PROTEIN_{index}', 'protein_name': f'PROTEIN_{index}'} for index in range(protein_count)]
+
+    @staticmethod
+    def move_tensor_dict(values):
+        if values is None:
+            return None
+        return {
+            key: value.to(device) if isinstance(value, torch.Tensor) else value
+            for key, value in values.items()
+        }
+
+    @staticmethod
+    def load_checkpoint(path: Path):
+        try:
+            return torch.load(path, map_location=device, weights_only=False)
+        except TypeError:
+            return torch.load(path, map_location=device)
+
+    @staticmethod
+    def build_args(dataset_name: str, data_dir: Path):
+        preset = DATASET_PRESETS.get(dataset_name, DATASET_PRESETS['C-dataset'])
+
+        class MockArgs:
+            def __init__(self, dataset: str, root: Path, cfg: Dict[str, int]):
+                self.dataset = dataset
+                self.data_dir = str(root)
+                self.neighbor = cfg['neighbor']
+                self.hgt_layer = cfg['hgt_layer']
+                self.hgt_head = cfg['hgt_head']
+                self.hgt_head_dim = cfg['hgt_head_dim']
+                self.hgt_in_dim = cfg['hgt_in_dim']
+                self.hgt_out_dim = cfg['gt_out_dim']
+                self.gt_layer = 2
+                self.gt_head = 2
+                self.gt_out_dim = cfg['gt_out_dim']
+                self.tr_layer = 2
+                self.tr_head = 4
+                self.dropout = 0.2
+                self.assoc_backbone = 'vanilla_hgt'
+                self.fusion_mode = 'mva'
+                self.pair_mode = 'mul_mlp'
+                self.gate_mode = 'vector'
+                self.gate_bias_init = -2.0
+                self.temperature = 0.5
+                self.topo_hidden = cfg['topo_hidden']
+                self.topo_feat_dim = 7
+                self.device = str(device)
+
+        return MockArgs(dataset_name, data_dir, preset)
+
+    def get_related_proteins(self, ctx: Dict[str, object], source_type: str, source_idx: int, limit: int = 5) -> List[Dict[str, str]]:
+        protein_indices: List[int] = []
+        if source_type == 'drug':
+            for row in ctx['drpr_edges']:
+                if int(row[0]) == source_idx:
+                    protein_indices.append(int(row[1]))
+        else:
+            for row in ctx['dipr_edges']:
+                if int(row[0]) == source_idx:
+                    protein_indices.append(int(row[1]))
+
+        seen = set()
+        related = []
+        for protein_idx in protein_indices:
+            if protein_idx in seen or protein_idx >= len(ctx['protein_info']):
+                continue
+            seen.add(protein_idx)
+            related.append(ctx['protein_info'][protein_idx])
+            if len(related) >= limit:
+                break
+        return related
 
     def load_context(self, dataset_name: str):
         if dataset_name in self.cached_data:
             return self.cached_data[dataset_name]
 
         data_dir, model_path = self.get_dataset_paths(dataset_name)
-        if not os.path.exists(data_dir):
-             raise HTTPException(status_code=404, detail=f"Dataset directory not found: {dataset_name}")
+        if not data_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Dataset directory not found: {dataset_name}")
 
-        # Giả lập args cho data_preprocess
-        class MockArgs:
-            def __init__(self, data_dir):
-                self.data_dir = data_dir
-                self.neighbor = 20
-                self.hgt_layer = 2
-                self.hgt_head = 8
-                self.hgt_head_dim = 25
-                self.hgt_in_dim = 128
-                self.hgt_out_dim = 200
-                self.gt_layer = 2
-                self.gt_head = 2
-                self.gt_out_dim = 200
-                self.tr_layer = 2
-                self.tr_head = 4
-                self.dropout = 0.2
-        
-        args = MockArgs(data_dir)
-        
-        # Load CSV metadata for UI display
-        drugs_info = self.load_csv(data_dir + 'DrugInformation.csv')
-        disease_info = self.load_csv(data_dir + 'DiseaseInformation.csv')
-        protein_info = self.load_csv(data_dir + 'ProteinNameMap.csv')
+        args = self.build_args(dataset_name, data_dir)
 
-        # Load numerical data for model
-        drf = pd.read_csv(data_dir + 'DrugFingerprint.csv').iloc[:, 1:].to_numpy()
-        drg = pd.read_csv(data_dir + 'DrugGIP.csv').iloc[:, 1:].to_numpy()
-        dip = pd.read_csv(data_dir + 'DiseasePS.csv').iloc[:, 1:].to_numpy()
-        dig = pd.read_csv(data_dir + 'DiseaseGIP.csv').iloc[:, 1:].to_numpy()
-        
+        drf = pd.read_csv(data_dir / 'DrugFingerprint.csv').iloc[:, 1:].to_numpy()
+        drg = pd.read_csv(data_dir / 'DrugGIP.csv').iloc[:, 1:].to_numpy()
+        dip = pd.read_csv(data_dir / 'DiseasePS.csv').iloc[:, 1:].to_numpy()
+        dig = pd.read_csv(data_dir / 'DiseaseGIP.csv').iloc[:, 1:].to_numpy()
+
         drs = np.where(drf == 0, drg, (drf + drg) / 2)
         dis = np.where(dip == 0, dig, (dip + dig) / 2)
 
         data = {
-            'drs': drs, 'dis': dis,
-            'drpr': pd.read_csv(data_dir + 'DrugProteinAssociationNumber.csv', dtype=int).to_numpy(),
-            'dipr': pd.read_csv(data_dir + 'ProteinDiseaseAssociationNumber.csv', dtype=int).to_numpy(),
-            'drugfeature': pd.read_csv(data_dir + 'Drug_mol2vec.csv', header=None).iloc[:, 1:].to_numpy(),
-            'diseasefeature': pd.read_csv(data_dir + 'DiseaseFeature.csv', header=None).iloc[:, 1:].to_numpy(),
-            'proteinfeature': pd.read_csv(data_dir + 'Protein_ESM.csv', header=None).iloc[:, 1:].to_numpy()
+            'drs': drs,
+            'dis': dis,
+            'drdi': pd.read_csv(data_dir / 'DrugDiseaseAssociationNumber.csv', dtype=int).to_numpy(),
+            'drpr': pd.read_csv(data_dir / 'DrugProteinAssociationNumber.csv', dtype=int).to_numpy(),
+            'dipr': pd.read_csv(data_dir / 'ProteinDiseaseAssociationNumber.csv', dtype=int).to_numpy(),
+            'drugfeature': pd.read_csv(data_dir / 'Drug_mol2vec.csv', header=None).iloc[:, 1:].to_numpy(),
+            'diseasefeature': pd.read_csv(data_dir / 'DiseaseFeature.csv', header=None).iloc[:, 1:].to_numpy(),
+            'proteinfeature': pd.read_csv(data_dir / 'Protein_ESM.csv', header=None).iloc[:, 1:].to_numpy(),
         }
-        
+
         args.drug_number = data['drugfeature'].shape[0]
         args.disease_number = data['diseasefeature'].shape[0]
         args.protein_number = data['proteinfeature'].shape[0]
 
-        # Build graphs
-        drdr_graph, didi_graph, _ = dgl_similarity_graph(data, args)
-        
-        # Build heterograph (initially empty associations for inference? Or full?)
-        # For simple inference, we can use the full training association or just zeros.
-        # Here we use empty as we are predicting NEW associations.
-        empty_drdi = np.empty((0, 2), dtype=int)
-        drdipr_graph, data = dgl_heterograph(data, empty_drdi, args)
+        drugs_info = self.load_drug_info(data_dir, args.drug_number)
+        disease_info = self.load_disease_info(data_dir, args.drug_number, args.disease_number)
+        protein_info = self.load_protein_info(data_dir, args.protein_number)
 
-        # Move to device
+        drdr_graph, didi_graph, _ = dgl_similarity_graph(data, args)
+        drug_topo_feat, disease_topo_feat = extract_topology_features(data, args)
+
+        empty_drdi = np.empty((0, 2), dtype=int)
+        heterograph_result = dgl_heterograph(data, empty_drdi, args)
+        drdipr_graph = heterograph_result[0]
+        data = heterograph_result[1]
+        edge_stats = heterograph_result[2] if len(heterograph_result) > 2 else None
+
         drdr_graph = drdr_graph.to(device)
         didi_graph = didi_graph.to(device)
         drdipr_graph = drdipr_graph.to(device)
-        
         drug_feature = torch.tensor(data['drugfeature'], dtype=torch.float32).to(device)
         disease_feature = torch.tensor(data['diseasefeature'], dtype=torch.float32).to(device)
         protein_feature = torch.tensor(data['proteinfeature'], dtype=torch.float32).to(device)
+        drug_topo_feat = drug_topo_feat.to(device)
+        disease_topo_feat = disease_topo_feat.to(device)
 
         context = {
             'args': args,
+            'model_path': model_path,
             'drdr_graph': drdr_graph,
             'didi_graph': didi_graph,
             'drdipr_graph': drdipr_graph,
             'drug_feature': drug_feature,
             'disease_feature': disease_feature,
             'protein_feature': protein_feature,
+            'drug_topo_feat': drug_topo_feat,
+            'disease_topo_feat': disease_topo_feat,
+            'edge_stats': self.move_tensor_dict(edge_stats),
             'drugs_info': drugs_info,
             'disease_info': disease_info,
-            'protein_info': protein_info
+            'protein_info': protein_info,
+            'drpr_edges': data['drpr'],
+            'dipr_edges': data['dipr'],
         }
         self.cached_data[dataset_name] = context
         return context
@@ -138,17 +309,17 @@ class InferenceManager:
         if dataset_name in self.cached_models:
             return self.cached_models[dataset_name]
 
-        data_dir, model_path = self.get_dataset_paths(dataset_name)
-        if not os.path.exists(model_path):
-            return None # Fallback to mock if model not trained yet
+        _, model_path = self.get_dataset_paths(dataset_name)
+        if model_path is None or not model_path.exists():
+            return None
 
         ctx = self.load_context(dataset_name)
-        
-        # Init model with the same args as training
         model = AMNTDDA(ctx['args']).to(device)
-        
+
         try:
-            model.load_state_dict(torch.load(model_path, map_location=device))
+            checkpoint = self.load_checkpoint(model_path)
+            state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+            model.load_state_dict(state_dict)
             model.eval()
             self.cached_models[dataset_name] = model
             return model
@@ -156,32 +327,19 @@ class InferenceManager:
             print(f"Error loading model: {e}")
             return None
 
-    def load_csv(self, path):
-        if not os.path.exists(path): return []
-        with open(path, 'r', encoding='utf-8') as f:
-            return list(csv.DictReader(f))
-
-    def load_disease_info(self, path):
-        rows = []
-        if not os.path.exists(path): return rows
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                code = line.strip().split(',')[0]
-                if code: rows.append({'id': code, 'name': code})
-        return rows
-
 manager = InferenceManager()
+
 
 def fuzzy_match(items: List[Dict[str, str]], text: str, name_key: str = 'name'):
     text_lower = text.strip().lower()
     for item in items:
         if (item.get(name_key) or '').lower() == text_lower or item.get('id', '').lower() == text_lower:
             return item
-    # If no exact match, try partial
     for item in items:
         if text_lower in (item.get(name_key) or '').lower() or text_lower in item.get('id', '').lower():
             return item
     return None
+
 
 @app.post('/predict')
 async def predict(payload: PredictRequest):
@@ -189,31 +347,31 @@ async def predict(payload: PredictRequest):
     ctx = manager.load_context(dataset)
     model = manager.get_model(dataset)
     is_real = model is not None
-    
-    # Smart Match & Note logic
-    note = f"Đang sử dụng mô hình HGT thật (Tăng tốc GPU). Dữ liệu: {dataset}." if is_real else "Đang chạy Demo (Chưa tìm thấy best_model.pth cho dataset này)."
+
+    if is_real and ctx['model_path'] is not None:
+        note = f"Đang sử dụng checkpoint {Path(ctx['model_path']).name} trên {dataset}."
+    else:
+        note = f"Đang chạy Demo cho {dataset} (chưa tìm thấy checkpoint phù hợp)."
+
     source = None
-    
+
     if payload.query_type == 'drug_to_disease':
         source = fuzzy_match(ctx['drugs_info'], payload.input_text, 'name')
         if not source:
-            # Check if user entered a disease instead
             alt_source = fuzzy_match(ctx['disease_info'], payload.input_text, 'name')
             if alt_source:
                 note = f"⚠️ Thông báo: '{payload.input_text}' là một Bệnh."
             else:
                 note = f"ℹ️ Không tìm thấy thực thể '{payload.input_text}' trong hệ thống dữ liệu."
             return {'status': 'success', 'results': [], 'note': note, 'graph': {'nodes': [], 'links': []}}
-            
         source_idx = ctx['drugs_info'].index(source)
         num_diseases = len(ctx['disease_info'])
-        x_infer = torch.tensor([[source_idx, i] for i in range(num_diseases)]).to(device)
+        x_infer = torch.tensor([[source_idx, i] for i in range(num_diseases)], dtype=torch.long, device=device)
         target_info = ctx['disease_info']
         target_type = 'disease'
     else:
         source = fuzzy_match(ctx['disease_info'], payload.input_text, 'name')
         if not source:
-            # Check if user entered a drug instead
             alt_source = fuzzy_match(ctx['drugs_info'], payload.input_text, 'name')
             if alt_source:
                 note = f"⚠️ Thông báo: '{payload.input_text}' là một Thuốc."
@@ -223,7 +381,7 @@ async def predict(payload: PredictRequest):
 
         source_idx = ctx['disease_info'].index(source)
         num_drugs = len(ctx['drugs_info'])
-        x_infer = torch.tensor([[i, source_idx] for i in range(num_drugs)]).to(device)
+        x_infer = torch.tensor([[i, source_idx] for i in range(num_drugs)], dtype=torch.long, device=device)
         target_info = ctx['drugs_info']
         target_type = 'drug'
 
@@ -232,13 +390,15 @@ async def predict(payload: PredictRequest):
             _, scores = model(
                 ctx['drdr_graph'], ctx['didi_graph'], ctx['drdipr_graph'],
                 ctx['drug_feature'], ctx['disease_feature'], ctx['protein_feature'],
-                x_infer
+                x_infer,
+                drug_topo_feat=ctx['drug_topo_feat'],
+                disease_topo_feat=ctx['disease_topo_feat'],
+                edge_stats=ctx['edge_stats'],
             )
             probs = fn.softmax(scores, dim=-1)[:, 1].cpu().numpy()
     else:
         probs = np.random.uniform(0.1, 0.9, len(target_info))
 
-    # Sort and take top K
     results = []
     indices = np.argsort(-probs)[:payload.top_k]
     for idx in indices:
@@ -250,12 +410,10 @@ async def predict(payload: PredictRequest):
             'type': target_type
         })
 
-    # Build Graph for Visualization
     graph_nodes = [{'id': f"{payload.query_type.split('_')[0]}:{source['id']}", 'actual_id': source['id'], 'label': source.get('name', source['id']), 'type': payload.query_type.split('_')[0], 'color': '#2563eb' if payload.query_type.startswith('drug') else '#dc2626'}]
     graph_links = []
-    
-    # Show top 5 proteins connected to source (from metadata)
-    for p in ctx['protein_info'][:5]:
+
+    for p in manager.get_related_proteins(ctx, payload.query_type.split('_')[0], source_idx, limit=5):
         p_id = f"protein:{p['id']}"
         label = p.get('protein_name', p.get('name', p['id']))
         graph_nodes.append({'id': p_id, 'actual_id': p['id'], 'label': label, 'type': 'protein', 'color': '#f59e0b'})
@@ -267,11 +425,13 @@ async def predict(payload: PredictRequest):
         graph_links.append({'source': graph_nodes[0]['id'], 'target': res_id, 'score': res['score']})
 
     return {
+        'status': 'success',
         'matched_input': {'id': source['id'], 'name': source.get('name', source['id']), 'type': payload.query_type.split('_')[0]},
         'results': results,
         'graph': {'nodes': graph_nodes, 'links': graph_links},
-        'note': 'Đang sử dụng Real HGT Model (GPU Acceleration)' if is_real else 'Đang chạy Demo (Chưa tìm thấy best_model.pth cho dataset này)'
+        'note': note,
     }
+
 
 @app.get('/health')
 def health():

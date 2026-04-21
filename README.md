@@ -67,7 +67,7 @@ C:\xampp\htdocs\DoANBase_Final\CaiTien_HGT_repo
 
 ### 2) Tạo database
 - Mở **phpMyAdmin**
-- Tạo database theo cấu hình trong `app/config.php`
+- Tạo database theo cấu hình trong `app/config.local.php` nếu bạn đã tạo file local, hoặc `app/config.php` nếu chỉ dùng bản mẫu
 - Import file SQL nếu dự án có sẵn schema/dump dữ liệu
 
 > Nếu bạn chưa có file SQL, hãy kiểm tra trong repo xem có file như `database_schema.sql`, `schema.sql` hoặc file dump tương tự.
@@ -76,7 +76,13 @@ C:\xampp\htdocs\DoANBase_Final\CaiTien_HGT_repo
 Mở file:
 
 ```bash
-app/config.php
+app/config.local.php
+```
+
+Nếu chưa có file local, hãy copy từ:
+
+```bash
+app/config.example.php
 ```
 
 Kiểm tra các thông số:

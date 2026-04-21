@@ -2,7 +2,16 @@
 
 declare(strict_types=1);
 
-$config = require __DIR__ . '/config.php';
+$configFile = __DIR__ . '/config.local.php';
+if (!file_exists($configFile)) {
+    $configFile = __DIR__ . '/config.php';
+}
+
+if (!file_exists($configFile)) {
+    throw new RuntimeException('Thiếu file cấu hình. Hãy tạo app/config.local.php từ app/config.example.php.');
+}
+
+$config = require $configFile;
 
 date_default_timezone_set('Asia/Ho_Chi_Minh');
 
