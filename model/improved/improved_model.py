@@ -12,6 +12,7 @@ from .contrastive_loss import MultiViewContrastiveLoss
 from .fuzzy_attention import FuzzyGate
 from .multi_view_aggregator import MultiViewAggregator
 from .rlg_hgt import RLGHGT
+from .similarity_view_fusion import SimilarityViewFusion
 from .topology_encoder import TopologyEncoder
 
 
@@ -86,6 +87,7 @@ class AMNTDDA(nn.Module):
         self.pair_mode = getattr(args, "pair_mode", "mul_mlp")
         self.gate_mode = getattr(args, "gate_mode", "vector")
         self.gate_bias_init = getattr(args, "gate_bias_init", -2.0)
+        self.similarity_view_mode = getattr(args, "similarity_view_mode", "consensus")
 
         self.drug_linear = nn.Linear(300, args.hgt_in_dim)
         self.protein_linear = nn.Linear(320, args.hgt_in_dim)
@@ -109,6 +111,21 @@ class AMNTDDA(nn.Module):
             args.gt_head,
             args.dropout,
         )
+        self.drug_similarity_fuser = None
+        self.disease_similarity_fuser = None
+        if self.similarity_view_mode == "multi":
+            self.drug_similarity_fuser = SimilarityViewFusion(
+                view_dim=args.gt_out_dim,
+                nhead=args.tr_head,
+                num_layers=max(1, args.tr_layer),
+                dropout=args.dropout,
+            )
+            self.disease_similarity_fuser = SimilarityViewFusion(
+                view_dim=args.gt_out_dim,
+                nhead=args.tr_head,
+                num_layers=max(1, args.tr_layer),
+                dropout=args.dropout,
+            )
 
         self.canonical_etypes = [
             ("drug", "association", "disease"),
@@ -275,6 +292,28 @@ class AMNTDDA(nn.Module):
 
         return self.drug_assoc_proj(drug_assoc), self.disease_assoc_proj(disease_assoc)
 
+    def _compute_similarity_embeddings(self, graph_input, encoder, fuser, prefix, return_diagnostics=False):
+        if isinstance(graph_input, dict):
+            view_names = list(graph_input.keys())
+            view_embeddings = [encoder(graph_input[name]) for name in view_names]
+            diagnostics = {}
+            if fuser is not None:
+                if return_diagnostics:
+                    fused, weights = fuser(view_embeddings, return_weights=True)
+                    for idx, name in enumerate(view_names):
+                        diagnostics[f"{prefix}_view_weight_{name}"] = float(weights[:, idx].mean().item())
+                else:
+                    fused = fuser(view_embeddings)
+            else:
+                fused = torch.stack(view_embeddings, dim=0).mean(dim=0)
+                if return_diagnostics:
+                    uniform_weight = 1.0 / max(1, len(view_names))
+                    for name in view_names:
+                        diagnostics[f"{prefix}_view_weight_{name}"] = uniform_weight
+            return fused, diagnostics
+
+        return encoder(graph_input), {}
+
     @staticmethod
     def _summarize_gate_branch(base_rep, gate_details, prefix):
         gate = gate_details["gate"]
@@ -324,8 +363,20 @@ class AMNTDDA(nn.Module):
     ):
         del edge_stats
 
-        drug_sim = self.gt_drug(drdr_graph)
-        disease_sim = self.gt_disease(didi_graph)
+        drug_sim, drug_view_diagnostics = self._compute_similarity_embeddings(
+            drdr_graph,
+            self.gt_drug,
+            self.drug_similarity_fuser,
+            "drug",
+            return_diagnostics=return_diagnostics,
+        )
+        disease_sim, disease_view_diagnostics = self._compute_similarity_embeddings(
+            didi_graph,
+            self.gt_disease,
+            self.disease_similarity_fuser,
+            "disease",
+            return_diagnostics=return_diagnostics,
+        )
         drug_assoc, disease_assoc = self._compute_assoc_views(drdipr_graph, drug_feature, disease_feature, protein_feature)
 
         drug_topo = torch.zeros_like(drug_sim) if drug_topo_feat is None else self.drug_topology_encoder(drug_topo_feat)
@@ -339,6 +390,7 @@ class AMNTDDA(nn.Module):
             "assoc_backbone": self.assoc_backbone,
             "fusion_mode": self.fusion_mode,
             "pair_mode": self.pair_mode,
+            "similarity_view_mode": self.similarity_view_mode,
             "contrastive_alignment_drug": float(F.cosine_similarity(drug_sim, drug_topo, dim=-1).mean().item()),
             "contrastive_alignment_disease": float(F.cosine_similarity(disease_sim, disease_topo, dim=-1).mean().item()),
             "drug_sim_assoc_cos": float(F.cosine_similarity(drug_sim, drug_assoc, dim=-1).mean().item()),
@@ -347,6 +399,8 @@ class AMNTDDA(nn.Module):
             "disease_assoc_norm": float(torch.norm(disease_assoc, dim=-1).mean().item()),
             "contrastive": float(contrastive.item()),
         }
+        diagnostics.update(drug_view_diagnostics)
+        diagnostics.update(disease_view_diagnostics)
 
         if self.fusion_mode == "mva":
             drug_repr = self.drug_multi_view(drug_sim, drug_assoc, drug_topo)

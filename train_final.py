@@ -14,7 +14,14 @@ import torch.nn.functional as fn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from data_preprocess_improved import dgl_heterograph, dgl_similarity_graph, data_processing, get_data, k_fold
+from data_preprocess_improved import (
+    dgl_heterograph,
+    dgl_similarity_graph,
+    dgl_similarity_view_graphs,
+    data_processing,
+    get_data,
+    k_fold,
+)
 from metric import get_metric
 from model.improved.improved_model import AMNTDDA
 from topology_features import extract_topology_features
@@ -55,14 +62,16 @@ DATASET_PRESETS = {
         "topo_hidden": 128,
     },
     "F-dataset": {
-        "lr": 1e-4,
+        "lr": 8e-5,
         "weight_decay": 1e-3,
-        "neighbor": 5,
-        "gt_out_dim": 256,
-        "hgt_layer": 2,
-        "hgt_in_dim": 256,
-        "hgt_head_dim": 32,
-        "topo_hidden": 128,
+        "neighbor": 10,
+        "gt_out_dim": 384,
+        "hgt_layer": 3,
+        "hgt_in_dim": 384,
+        "hgt_head_dim": 48,
+        "topo_hidden": 192,
+        "similarity_view_mode": "multi",
+        "positive_weight_mode": "global_log",
     },
 }
 
@@ -105,10 +114,42 @@ def apply_dataset_preset(args):
         if getattr(args, key, None) is None:
             setattr(args, key, value)
 
+    if args.similarity_view_mode is None:
+        args.similarity_view_mode = "consensus"
+    if args.positive_weight_mode is None:
+        args.positive_weight_mode = "none"
     if args.hgt_head_dim is None:
         args.hgt_head_dim = max(1, args.gt_out_dim // args.hgt_head)
     args.hgt_out_dim = args.gt_out_dim
     args.topo_feat_dim = 7
+
+
+def build_class_weights(args, data, y_train, device):
+    mode = getattr(args, "positive_weight_mode", "none")
+    if mode == "none":
+        return None, 1.0
+
+    total_pairs = max(1, int(args.drug_number * args.disease_number))
+    global_pos = max(1, int(len(data["drdi"])))
+    global_neg = max(1, total_pairs - global_pos)
+    sampled_pos = max(1, int((y_train == 1).sum().item()))
+    sampled_neg = max(1, int((y_train == 0).sum().item()))
+
+    if mode == "sampled":
+        pos_weight = sampled_neg / sampled_pos
+    elif mode == "global_linear":
+        pos_weight = global_neg / global_pos
+    elif mode == "global_sqrt":
+        pos_weight = float(np.sqrt(global_neg / global_pos))
+    elif mode == "global_log":
+        pos_weight = float(np.log1p(global_neg / global_pos))
+    else:
+        raise ValueError(f"Unsupported positive_weight_mode: {mode}")
+
+    pos_weight = max(1.0, float(pos_weight))
+    class_weights = torch.tensor([1.0, pos_weight], dtype=torch.float32, device=device)
+    class_weights = class_weights / class_weights.mean()
+    return class_weights, pos_weight
 
 
 def build_model_tag(args):
@@ -211,6 +252,8 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", default=0.5, type=float, help="temperature for contrastive loss")
     parser.add_argument("--disable_scheduler", action="store_true", help="disable ReduceLROnPlateau scheduler")
     parser.add_argument("--topo_hidden", default=None, type=int, help="hidden dimension for topology encoder")
+    parser.add_argument("--similarity_view_mode", choices=["consensus", "multi"], default=None, help="use only consensus similarity graph or fuse multiple similarity views")
+    parser.add_argument("--positive_weight_mode", choices=["none", "sampled", "global_log", "global_sqrt", "global_linear"], default=None, help="positive-class weighting strategy for sparse datasets")
     parser.add_argument("--fold_limit", type=int, default=None, help="optional limit on number of folds to execute")
     parser.add_argument("--assoc_backbone", choices=["vanilla_hgt", "rlghgt"], default="vanilla_hgt", help="association encoder backbone")
     parser.add_argument("--fusion_mode", choices=["mva", "rvg", "mva_fuzzy"], default="mva", help="node-view fusion strategy")
@@ -283,6 +326,7 @@ if __name__ == "__main__":
     else:
         logging.info("Early stopping: disabled")
     logging.info(f"Contrastive weight lambda_cl: {args.lambda_cl}")
+    logging.info(f"Similarity view mode: {args.similarity_view_mode} | Positive weight mode: {args.positive_weight_mode}")
     logging.info(
         "Model config: "
         f"tag={args.model_tag} | assoc={args.assoc_backbone} | fusion={args.fusion_mode} | "
@@ -299,9 +343,16 @@ if __name__ == "__main__":
     data = data_processing(data, args)
     data = k_fold(data, args)
 
-    drdr_graph, didi_graph, data = dgl_similarity_graph(data, args)
-    drdr_graph = drdr_graph.to(device)
-    didi_graph = didi_graph.to(device)
+    if args.similarity_view_mode == "multi":
+        drdr_graph, didi_graph, data = dgl_similarity_view_graphs(data, args)
+        drdr_graph = {name: graph.to(device) for name, graph in drdr_graph.items()}
+        didi_graph = {name: graph.to(device) for name, graph in didi_graph.items()}
+        logging.info(f"Drug similarity views: {list(drdr_graph.keys())}")
+        logging.info(f"Disease similarity views: {list(didi_graph.keys())}")
+    else:
+        drdr_graph, didi_graph, data = dgl_similarity_graph(data, args)
+        drdr_graph = drdr_graph.to(device)
+        didi_graph = didi_graph.to(device)
 
     logging.info("Extracting topology features...")
     drug_topo_feat, disease_topo_feat = extract_topology_features(data, args)
@@ -339,12 +390,19 @@ if __name__ == "__main__":
             patience=30,
             min_lr=1e-6,
         )
-        criterion = nn.CrossEntropyLoss()
-
         x_train = torch.tensor(data["X_train"][fold_idx], dtype=torch.long, device=device)
         y_train = torch.tensor(data["Y_train"][fold_idx], dtype=torch.long, device=device).flatten()
         x_test = torch.tensor(data["X_test"][fold_idx], dtype=torch.long, device=device)
         y_test = data["Y_test"][fold_idx].flatten()
+        class_weights, pos_weight = build_class_weights(args, data, y_train, device)
+        criterion = nn.CrossEntropyLoss(
+            weight=class_weights,
+            label_smoothing=max(0.0, float(args.label_smoothing)),
+        )
+        logging.info(
+            f"Fold {fold_idx} loss config: pos_weight_mode={args.positive_weight_mode}, "
+            f"raw_positive_weight={pos_weight:.4f}, label_smoothing={float(args.label_smoothing):.4f}"
+        )
 
         drdipr_graph, _, _ = dgl_heterograph(data, data["X_train"][fold_idx], args)
         drdipr_graph = drdipr_graph.to(device)
