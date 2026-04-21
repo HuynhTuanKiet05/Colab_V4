@@ -169,6 +169,26 @@ def build_results_dataframe(best_epochs, aucs, auprs, accs, precs, recs, f1s, mc
     return pd.concat([results_df, summary_df], ignore_index=True)
 
 
+def build_epoch_metric_header():
+    columns = ["Epoch", "Time", "AUC", "AUPR", "Accuracy", "Precision", "Recall", "F1-score", "Mcc"]
+    return " ".join(f"{column:>10}" for column in columns)
+
+
+def format_epoch_metric_row(epoch, elapsed, auc, aupr, accuracy, precision, recall, f1, mcc):
+    values = [
+        epoch,
+        f"{elapsed:.2f}",
+        f"{auc:.5f}",
+        f"{aupr:.5f}",
+        f"{accuracy:.5f}",
+        f"{precision:.5f}",
+        f"{recall:.5f}",
+        f"{f1:.5f}",
+        f"{mcc:.5f}",
+    ]
+    return " ".join(f"{value:>10}" for value in values)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--k_fold", type=int, default=10, help="k-fold cross validation")
@@ -294,7 +314,7 @@ if __name__ == "__main__":
     disease_feature = torch.tensor(data["diseasefeature"], dtype=torch.float32).to(device)
     protein_feature = torch.tensor(data["proteinfeature"], dtype=torch.float32).to(device)
 
-    metric_header = "Epoch\t\tTime\t\tLR\t\tLoss\t\tCL_Loss\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc"
+    metric_header = build_epoch_metric_header()
     logging.info(metric_header)
 
     aucs, auprs, accs, precs, recs, f1s, mccs, best_epochs = [], [], [], [], [], [], [], []
@@ -390,26 +410,17 @@ if __name__ == "__main__":
                     scheduler.step(auc)
 
                 elapsed = timeit.default_timer() - start
-                current_lr = optimizer.param_groups[0]["lr"]
                 logging.info(
-                    "\t\t".join(
-                        map(
-                            str,
-                            [
-                                epoch + 1,
-                                round(elapsed, 2),
-                                f"{current_lr:.1e}",
-                                round(float(train_loss.item()), 5),
-                                round(float(contrastive_loss.item()), 5),
-                                round(float(auc), 5),
-                                round(float(aupr), 5),
-                                round(float(accuracy), 5),
-                                round(float(precision), 5),
-                                round(float(recall), 5),
-                                round(float(f1), 5),
-                                round(float(mcc), 5),
-                            ],
-                        )
+                    format_epoch_metric_row(
+                        epoch + 1,
+                        elapsed,
+                        float(auc),
+                        float(aupr),
+                        float(accuracy),
+                        float(precision),
+                        float(recall),
+                        float(f1),
+                        float(mcc),
                     )
                 )
 
