@@ -90,6 +90,10 @@ class AMNTDDA(nn.Module):
         self.drug_linear = nn.Linear(300, args.hgt_in_dim)
         self.protein_linear = nn.Linear(320, args.hgt_in_dim)
         self.disease_linear = nn.Linear(64, args.hgt_in_dim) if args.hgt_in_dim != 64 else None
+        # C3: Feature normalization — prevents scale mismatch across entity types
+        self.drug_norm = nn.LayerNorm(args.hgt_in_dim)
+        self.protein_norm = nn.LayerNorm(args.hgt_in_dim)
+        self.disease_norm = nn.LayerNorm(args.hgt_in_dim)
 
         self.gt_drug = gt_net_drug.GraphTransformer(
             self.runtime_device,
@@ -235,10 +239,12 @@ class AMNTDDA(nn.Module):
             raise ValueError(f"Unsupported pair_mode: {self.pair_mode}")
 
     def _encode_entity_features(self, drug_feature, disease_feature, protein_feature):
-        drug_feature = self.drug_linear(drug_feature)
-        protein_feature = self.protein_linear(protein_feature)
+        drug_feature = self.drug_norm(self.drug_linear(drug_feature))
+        protein_feature = self.protein_norm(self.protein_linear(protein_feature))
         if self.disease_linear is not None:
-            disease_feature = self.disease_linear(disease_feature)
+            disease_feature = self.disease_norm(self.disease_linear(disease_feature))
+        else:
+            disease_feature = self.disease_norm(disease_feature)
         return {
             "drug": drug_feature,
             "disease": disease_feature,

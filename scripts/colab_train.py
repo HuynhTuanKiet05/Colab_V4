@@ -13,13 +13,12 @@ def parse_args():
     parser.add_argument('--preset', default='standard', choices=['smoke', 'standard', 'full'])
     parser.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'])
     parser.add_argument('--mount-drive', action=argparse.BooleanOptionalAction, default=False, help='mount Google Drive before training')
-    parser.add_argument('--drive-root', default='/content/drive/MyDrive/Colab_V2_runs', help='base output folder when using Drive')
+    parser.add_argument('--drive-root', default='/content/drive/MyDrive/Colab_V4_runs', help='base output folder when using Drive')
     parser.add_argument('--data-root', default=None, help='override dataset directory')
     parser.add_argument('--result-root', default=None, help='override result directory')
     parser.add_argument('--epochs', type=int, default=None)
     parser.add_argument('--k-fold', type=int, default=None)
-    parser.add_argument('--warmup-epochs', type=int, default=None)
-    parser.add_argument('--target-auc-warmup', type=int, default=None)
+    parser.add_argument('--fold-limit', type=int, default=None)
     parser.add_argument('--score-every', type=int, default=None)
     parser.add_argument('--neighbor', type=int, default=None)
     parser.add_argument('--lr', type=float, default=None)
@@ -39,35 +38,32 @@ def maybe_mount_drive(enabled: bool):
 def build_preset(args):
     presets = {
         'smoke': {
-            'epochs': 2,
+            'epochs': 5,
             'k_fold': 2,
-            'warmup_epochs': 1,
-            'target_auc_warmup': 1,
+            'fold_limit': 1,
             'score_every': 1,
             'neighbor': 5,
-            'lr': 3e-4,
+            'lr': 1e-4,
         },
         'standard': {
-            'epochs': 180,
-            'k_fold': 5,
-            'warmup_epochs': 40,
-            'target_auc_warmup': 60,
+            'epochs': 150,
+            'k_fold': 10,
+            'fold_limit': 2,
             'score_every': 1,
-            'neighbor': 10,
-            'lr': 3e-4,
+            'neighbor': 5,
+            'lr': 1e-4,
         },
         'full': {
             'epochs': 1000,
             'k_fold': 10,
-            'warmup_epochs': 250,
-            'target_auc_warmup': 400,
+            'fold_limit': None,
             'score_every': 1,
-            'neighbor': 10,
-            'lr': 3e-4,
+            'neighbor': 5,
+            'lr': 1e-4,
         },
     }
     config = presets[args.preset]
-    for key in ['epochs', 'k_fold', 'warmup_epochs', 'target_auc_warmup', 'score_every', 'neighbor', 'lr']:
+    for key in ['epochs', 'k_fold', 'fold_limit', 'score_every', 'neighbor', 'lr']:
         override = getattr(args, key)
         if override is not None:
             config[key] = override
@@ -108,12 +104,13 @@ def main():
         '--result_root', str(result_root),
         '--epochs', str(preset['epochs']),
         '--k_fold', str(preset['k_fold']),
-        '--warmup_epochs', str(preset['warmup_epochs']),
-        '--target_auc_warmup', str(preset['target_auc_warmup']),
         '--score_every', str(preset['score_every']),
         '--neighbor', str(preset['neighbor']),
         '--lr', str(preset['lr']),
+        '--save_checkpoints',
     ]
+    if preset['fold_limit'] is not None:
+        cmd.extend(['--fold_limit', str(preset['fold_limit'])])
 
     print('Launching training command:', flush=True)
     print(' '.join(cmd), flush=True)

@@ -86,11 +86,11 @@ def data_processing(data, args):
     drs_mean = (data['drf'] + data['drg']) / 2
     dis_mean = (data['dip'] + data['dig']) / 2
 
-    # Keep consensus views consistent with the reference pipeline:
-    #  - when one view is zero, fall back to the other similarity view
-    #  - otherwise use the arithmetic mean
+    # Consensus similarity: arithmetic mean of two views
+    #  - Drug: when fingerprint=0, fallback to GIP
+    #  - Disease: when phenotype=0, keep 0 (paper original behavior, no fallback)
     drs = np.where(data['drf'] == 0, data['drg'], drs_mean)
-    dis = np.where(data['dip'] == 0, data['dig'], dis_mean)
+    dis = np.where(data['dip'] == 0, data['dip'], dis_mean)
 
     data['drs'] = drs
     data['dis'] = dis
@@ -109,10 +109,8 @@ def k_fold(data, args):
     skf = StratifiedKFold(n_splits=k, random_state=None, shuffle=False)
     X = data['all_drdi']
     Y = data['all_label']
-    # n = skf.get_n_splits(X, Y)
     X_train_all, X_test_all, Y_train_all, Y_test_all = [], [], [], []
     for train_index, test_index in skf.split(X, Y):
-        # print('Train:', train_index, 'Test:', test_index)
         X_train, X_test = X[train_index], X[test_index]
         Y_train, Y_test = Y[train_index], Y[test_index]
         Y_train = np.expand_dims(Y_train, axis=1).astype('float64')
@@ -211,7 +209,7 @@ def dgl_heterograph(data, drdi, args):
         ('disease', 'association', 'protein'): to_edge_tuple(dipr_arr)
     }
 
-    data['feature_dict'] ={
+    data['feature_dict'] = {
         'drug': torch.tensor(data['drugfeature']),
         'disease': torch.tensor(data['diseasefeature']),
         'protein': torch.tensor(data['proteinfeature'])
@@ -219,20 +217,4 @@ def dgl_heterograph(data, drdi, args):
 
     drdipr_graph = dgl.heterograph(heterograph_dict, num_nodes_dict=node_dict)
 
-    edge_stats = {
-        'pair_bias': torch.log1p(torch.tensor(
-            [
-                drdipr_graph.num_edges(('drug', 'association', 'disease')),
-                drdipr_graph.num_edges(('drug', 'association', 'protein')),
-                drdipr_graph.num_edges(('disease', 'association', 'protein')),
-            ],
-            dtype=torch.float32,
-        )).mean().view(1, 1)
-    }
-
-    return drdipr_graph, data, edge_stats
-
-
-
-
-
+    return drdipr_graph, data
