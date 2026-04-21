@@ -1,5 +1,6 @@
 import argparse
 import gc
+import logging
 import os
 import random
 import timeit
@@ -128,6 +129,20 @@ def save_checkpoint(path, model, optimizer, scheduler, fold_idx, epoch, best_met
     torch.save(checkpoint, path)
 
 
+def configure_logging(result_dir):
+    log_file = Path(result_dir) / "training_log.txt"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(message)s",
+        handlers=[
+            logging.FileHandler(log_file, mode="a", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+        force=True,
+    )
+    return log_file
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--k_fold", type=int, default=10, help="k-fold cross validation")
@@ -145,17 +160,18 @@ if __name__ == "__main__":
     parser.add_argument("--save_checkpoints", action=argparse.BooleanOptionalAction, default=False, help="save model checkpoints")
     parser.add_argument("--eval_start_epoch", default=1, type=int, help="minimum epoch before evaluation begins")
     parser.add_argument("--score_every", default=1, type=int, help="evaluate every N epochs after eval_start_epoch")
-    parser.add_argument("--patience", default=150, type=int, help="early stopping patience in evaluation steps")
+    parser.add_argument("--patience", default=0, type=int, help="early stopping patience in evaluation steps; <=0 disables early stopping")
     parser.add_argument("--lambda_cl", default=0.1, type=float, help="weight for contrastive alignment loss")
     parser.add_argument("--temperature", default=0.5, type=float, help="temperature for contrastive loss")
     parser.add_argument("--disable_scheduler", action="store_true", help="disable ReduceLROnPlateau scheduler")
     parser.add_argument("--topo_hidden", default=None, type=int, help="hidden dimension for topology encoder")
     parser.add_argument("--fold_limit", type=int, default=None, help="optional limit on number of folds to execute")
-    parser.add_argument("--assoc_backbone", choices=["vanilla_hgt", "rlghgt"], default="rlghgt", help="association encoder backbone")
-    parser.add_argument("--fusion_mode", choices=["mva", "mva_fuzzy"], default="mva_fuzzy", help="node-view fusion strategy")
-    parser.add_argument("--pair_mode", choices=["mul_mlp", "interaction"], default="interaction", help="pair scoring head")
+    parser.add_argument("--assoc_backbone", choices=["vanilla_hgt", "rlghgt"], default="vanilla_hgt", help="association encoder backbone")
+    parser.add_argument("--fusion_mode", choices=["mva", "rvg", "mva_fuzzy"], default="mva", help="node-view fusion strategy")
+    parser.add_argument("--pair_mode", choices=["mul_mlp", "interaction"], default="mul_mlp", help="pair scoring head")
     parser.add_argument("--gate_mode", choices=["scalar", "vector"], default="vector", help="fuzzy gate output type")
     parser.add_argument("--gate_bias_init", default=-2.0, type=float, help="initial bias for fuzzy gate")
+    parser.add_argument("--grad_clip", default=0.0, type=float, help="max gradient norm; <=0 disables clipping")
     parser.add_argument("--use_relation_attention", action=argparse.BooleanOptionalAction, default=True, help="enable relation-aware attention in RLGHGT")
     parser.add_argument("--use_metapath", action=argparse.BooleanOptionalAction, default=True, help="enable metapath branch in RLGHGT")
     parser.add_argument("--use_global_hgt", action=argparse.BooleanOptionalAction, default=True, help="enable global context branch in RLGHGT")
@@ -194,8 +210,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     apply_dataset_preset(args)
+    if args.fusion_mode == "mva_fuzzy":
+        args.fusion_mode = "rvg"
 
     device = resolve_device(args.device)
+    args.device = device
     os.environ["AMDGT_DEVICE"] = device.type
     set_random_seed(args.random_seed)
 
@@ -207,23 +226,29 @@ if __name__ == "__main__":
 
     validate_data_dir(args.data_dir)
     os.makedirs(args.result_dir, exist_ok=True)
+    log_file = configure_logging(args.result_dir)
 
-    print("--- Starting Final Improved Pipeline ---")
-    print(f"Dataset: {args.dataset} | LR: {args.lr} | GT dim: {args.gt_out_dim} | Neighbor: {args.neighbor}")
-    print(f"Device: {device} | Data dir: {args.data_dir} | Result dir: {args.result_dir}")
-    print(f"Save checkpoints: {args.save_checkpoints}")
-    print(f"Early stopping patience: {args.patience}")
-    print(f"Contrastive weight lambda_cl: {args.lambda_cl}")
-    print(
+    logging.info("--- Starting Final Improved Pipeline ---")
+    logging.info(f"Dataset: {args.dataset} | LR: {args.lr} | GT dim: {args.gt_out_dim} | Neighbor: {args.neighbor}")
+    logging.info(f"Device: {device} | Data dir: {args.data_dir} | Result dir: {args.result_dir}")
+    logging.info(f"Save checkpoints: {args.save_checkpoints}")
+    if args.patience > 0:
+        logging.info(f"Early stopping patience: {args.patience}")
+    else:
+        logging.info("Early stopping: disabled")
+    logging.info(f"Contrastive weight lambda_cl: {args.lambda_cl}")
+    logging.info(
         "Model config: "
         f"tag={args.model_tag} | assoc={args.assoc_backbone} | fusion={args.fusion_mode} | "
         f"pair={args.pair_mode} | gate={args.gate_mode}"
     )
+    logging.info(f"Training log file: {log_file}")
 
     data = get_data(args)
     args.drug_number = data["drug_number"]
     args.disease_number = data["disease_number"]
     args.protein_number = data["protein_number"]
+    logging.info(f"Loaded data: {args.drug_number} drugs, {args.disease_number} diseases, {args.protein_number} proteins")
 
     data = data_processing(data, args)
     data = k_fold(data, args)
@@ -232,16 +257,19 @@ if __name__ == "__main__":
     drdr_graph = drdr_graph.to(device)
     didi_graph = didi_graph.to(device)
 
+    logging.info("Extracting topology features...")
     drug_topo_feat, disease_topo_feat = extract_topology_features(data, args)
     drug_topo_feat = drug_topo_feat.to(device)
     disease_topo_feat = disease_topo_feat.to(device)
+    logging.info(f"Drug topology features: {tuple(drug_topo_feat.shape)}")
+    logging.info(f"Disease topology features: {tuple(disease_topo_feat.shape)}")
 
     drug_feature = torch.tensor(data["drugfeature"], dtype=torch.float32).to(device)
     disease_feature = torch.tensor(data["diseasefeature"], dtype=torch.float32).to(device)
     protein_feature = torch.tensor(data["proteinfeature"], dtype=torch.float32).to(device)
 
-    metric_header = "Epoch\t\tTime\t\tLoss\t\tCL\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc"
-    print(metric_header)
+    metric_header = "Epoch\t\tTime\t\tLR\t\tLoss\t\tCL_Loss\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc"
+    logging.info(metric_header)
 
     aucs, auprs, accs, precs, recs, f1s, mccs, best_epochs = [], [], [], [], [], [], [], []
     best_overall_auc = -1.0
@@ -251,7 +279,10 @@ if __name__ == "__main__":
     max_folds = args.k_fold if args.fold_limit is None else min(args.k_fold, args.fold_limit)
 
     for fold_idx in range(max_folds):
-        print(f"\n--- Fold: {fold_idx} ---")
+        logging.info(f'\n{"=" * 60}')
+        logging.info(f"Fold: {fold_idx}")
+        logging.info(f'{"=" * 60}')
+        logging.info(metric_header)
 
         model = AMNTDDA(args).to(device)
         optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
@@ -305,14 +336,15 @@ if __name__ == "__main__":
 
             optimizer.zero_grad()
             train_loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            if args.grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
 
             should_eval = (epoch + 1) >= args.eval_start_epoch and ((epoch + 1 - args.eval_start_epoch) % max(1, args.score_every) == 0)
             if should_eval or epoch == args.epochs - 1:
                 model.eval()
                 with torch.no_grad():
-                    _, test_score, test_aux, diagnostics = model(
+                    _, test_score, diagnostics = model(
                         drdr_graph,
                         didi_graph,
                         drdipr_graph,
@@ -322,7 +354,6 @@ if __name__ == "__main__":
                         x_test,
                         drug_topo_feat=drug_topo_feat,
                         disease_topo_feat=disease_topo_feat,
-                        return_aux=True,
                         return_diagnostics=True,
                     )
 
@@ -333,16 +364,17 @@ if __name__ == "__main__":
                     scheduler.step(auc)
 
                 elapsed = timeit.default_timer() - start
-                test_contrastive = float(test_aux.get("contrastive", test_score.new_tensor(0.0)).item())
-                print(
+                current_lr = optimizer.param_groups[0]["lr"]
+                logging.info(
                     "\t\t".join(
                         map(
                             str,
                             [
                                 epoch + 1,
                                 round(elapsed, 2),
+                                f"{current_lr:.1e}",
                                 round(float(train_loss.item()), 5),
-                                round(test_contrastive, 5),
+                                round(float(contrastive_loss.item()), 5),
                                 round(float(auc), 5),
                                 round(float(aupr), 5),
                                 round(float(accuracy), 5),
@@ -388,23 +420,19 @@ if __name__ == "__main__":
                     else:
                         if auc > best_overall_auc:
                             best_overall_auc = float(auc)
-                    print(
-                        f"Best fold AUC improved to {auc:.5f} at epoch {epoch + 1} | "
-                        f"drug_gate={diagnostics.get('drug_gate_mean', 0.0):.4f} | "
-                        f"disease_gate={diagnostics.get('disease_gate_mean', 0.0):.4f} | "
-                        f"drug_assoc_norm={diagnostics.get('drug_assoc_norm', 0.0):.4f}"
-                    )
+                    logging.info(f"AUC improved at epoch {epoch + 1} ;\tbest_auc: {auc:.5f}")
                 else:
                     no_improve_steps += max(1, args.score_every)
 
-                if no_improve_steps >= args.patience:
-                    print(f"Early stopping at epoch {epoch + 1} after {no_improve_steps} epochs without AUC improvement.")
+                if args.patience > 0 and no_improve_steps >= args.patience:
+                    logging.info(f"Early stopping at epoch {epoch + 1} after {no_improve_steps} epochs without AUC improvement.")
                     break
             elif (epoch + 1) % max(1, args.log_every) == 0:
                 elapsed = timeit.default_timer() - start
-                print(
+                current_lr = optimizer.param_groups[0]["lr"]
+                logging.info(
                     f"Epoch {epoch + 1:4d} | {elapsed:7.2f}s | "
-                    f"loss {train_loss.item():.5f} | cls {ce_loss.item():.5f} | ctr {contrastive_loss.item():.5f}"
+                    f"lr {current_lr:.1e} | loss {train_loss.item():.5f} | cls {ce_loss.item():.5f} | ctr {contrastive_loss.item():.5f}"
                 )
 
         aucs.append(best_fold["AUC"])
@@ -415,7 +443,7 @@ if __name__ == "__main__":
         f1s.append(best_fold["F1"])
         mccs.append(best_fold["MCC"])
         best_epochs.append(best_fold["epoch"])
-        print(f"Fold {fold_idx} summary -> best AUC {best_fold['AUC']:.5f} at epoch {best_fold['epoch']}")
+        logging.info(f"Fold {fold_idx} completed: best_epoch={best_fold['epoch']}, best_auc={best_fold['AUC']:.5f}, best_aupr={best_fold['AUPR']:.5f}")
 
         del model, optimizer, scheduler, drdipr_graph
         gc.collect()
@@ -454,13 +482,17 @@ if __name__ == "__main__":
 
     output_csv = os.path.join(args.result_dir, f"{max_folds}_fold_results_{args.model_tag}.csv")
     final_df.to_csv(output_csv, index=False)
-    print("\n==============================")
-    print("FINAL RESULTS SUMMARY (REFERENCE-ALIGNED PIPELINE)")
-    print("==============================")
-    print(summary_df)
-    print(f"\nSaved improved results to: {output_csv}")
+    logging.info(f'\n{"=" * 60}')
+    logging.info("FINAL RESULTS SUMMARY (REFERENCE-ALIGNED PIPELINE)")
+    logging.info(f'{"=" * 60}')
+    logging.info(f"AUC: {aucs}")
+    logging.info(f"Mean AUC: {float(np.mean(aucs)):.5f} (+/- {float(np.std(aucs)):.5f})")
+    logging.info(f"AUPR: {auprs}")
+    logging.info(f"Mean AUPR: {float(np.mean(auprs)):.5f} (+/- {float(np.std(auprs)):.5f})")
+    logging.info(f"\n{summary_df.to_string(index=False)}")
+    logging.info(f"Saved improved results to: {output_csv}")
 
     if args.save_checkpoints and best_overall_payload is not None:
         overall_path = os.path.join(args.result_dir, f"best_model_{args.model_tag}.pth")
         torch.save(best_overall_payload, overall_path)
-        print(f"Saved best overall checkpoint to: {overall_path}")
+        logging.info(f"Saved best overall checkpoint to: {overall_path}")

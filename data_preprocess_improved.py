@@ -12,7 +12,7 @@ device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_ava
 def get_adj(edges, size):
     edges_tensor = torch.LongTensor(edges).t()
     values = torch.ones(len(edges))
-    adj = torch.sparse.LongTensor(edges_tensor, values, size).to_dense().long()
+    adj = torch.sparse_coo_tensor(edges_tensor, values, size).to_dense().long()
     return adj
 
 
@@ -106,7 +106,7 @@ def data_processing(data, args):
 
 def k_fold(data, args):
     k = args.k_fold
-    skf = StratifiedKFold(n_splits=k, random_state=args.random_seed, shuffle=True)
+    skf = StratifiedKFold(n_splits=k, random_state=None, shuffle=False)
     X = data['all_drdi']
     Y = data['all_label']
     # n = skf.get_n_splits(X, Y)
@@ -126,9 +126,9 @@ def k_fold(data, args):
         fold_dir = os.path.join(args.data_dir, 'fold', str(i))
         os.makedirs(fold_dir, exist_ok=True)
         X_train1 = pd.DataFrame(data=np.concatenate((X_train_all[i], Y_train_all[i]), axis=1), columns=['drug', 'disease', 'label'])
-        X_train1.to_csv(os.path.join(fold_dir, 'data_train.csv'))
+        X_train1.to_csv(os.path.join(fold_dir, 'data_train.csv'), index=False)
         X_test1 = pd.DataFrame(data=np.concatenate((X_test_all[i], Y_test_all[i]), axis=1), columns=['drug', 'disease', 'label'])
-        X_test1.to_csv(os.path.join(fold_dir, 'data_test.csv'))
+        X_test1.to_csv(os.path.join(fold_dir, 'data_test.csv'), index=False)
 
     data['X_train'] = X_train_all
     data['X_test'] = X_test_all
@@ -207,11 +207,8 @@ def dgl_heterograph(data, drdi, args):
 
     heterograph_dict = {
         ('drug', 'association', 'disease'): to_edge_tuple(drdi_arr),
-        ('disease', 'association_rev', 'drug'): to_edge_tuple(drdi_arr[:, ::-1] if drdi_arr.size > 0 else drdi_arr),
         ('drug', 'association', 'protein'): to_edge_tuple(drpr_arr),
-        ('protein', 'association_rev', 'drug'): to_edge_tuple(drpr_arr[:, ::-1] if drpr_arr.size > 0 else drpr_arr),
-        ('disease', 'association', 'protein'): to_edge_tuple(dipr_arr),
-        ('protein', 'association_rev', 'disease'): to_edge_tuple(dipr_arr[:, ::-1] if dipr_arr.size > 0 else dipr_arr)
+        ('disease', 'association', 'protein'): to_edge_tuple(dipr_arr)
     }
 
     data['feature_dict'] ={
@@ -224,9 +221,11 @@ def dgl_heterograph(data, drdi, args):
 
     edge_stats = {
         'pair_bias': torch.log1p(torch.tensor(
-            [drdipr_graph.num_edges(('drug', 'association', 'disease')),
-             drdipr_graph.num_edges(('drug', 'association', 'protein')),
-             drdipr_graph.num_edges(('disease', 'association', 'protein'))],
+            [
+                drdipr_graph.num_edges(('drug', 'association', 'disease')),
+                drdipr_graph.num_edges(('drug', 'association', 'protein')),
+                drdipr_graph.num_edges(('disease', 'association', 'protein')),
+            ],
             dtype=torch.float32,
         )).mean().view(1, 1)
     }
