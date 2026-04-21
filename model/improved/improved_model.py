@@ -238,11 +238,14 @@ class AMNTDDA(nn.Module):
 
         topology_align = self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_topo_repr))
         topology_align = topology_align + self._contrastive_loss(self.disease_align_sim(disease_view_fused), self.disease_align_hgt(disease_topo_repr))
+        topology_align = torch.clamp(topology_align, min=0.0)
+
+        sim_align = self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_hgt))
+        sim_align = sim_align + self._contrastive_loss(self.disease_align_sim(disease_view_fused), self.disease_align_hgt(disease_hgt))
+        sim_align = torch.clamp(sim_align, min=0.0)
 
         self.cached_aux = {
-            'contrastive': self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_hgt))
-            + self._contrastive_loss(self.disease_align_sim(disease_view_fused), self.disease_align_hgt(disease_hgt))
-            + 0.5 * topology_align,
+            'contrastive': sim_align + 0.25 * topology_align,
             'drug_view_weights': drug_view_weights.detach(),
             'disease_view_weights': disease_view_weights.detach(),
             'drug_gate_mean': float(drug_gate.mean().item()),
@@ -252,6 +255,8 @@ class AMNTDDA(nn.Module):
             'drug_repr_norm': torch.norm(drug_topo, dim=-1).mean().detach(),
             'disease_repr_norm': torch.norm(disease_topo, dim=-1).mean().detach(),
             'pair_topology_mean': pair_topology.mean().detach(),
+            'topology_align': topology_align.detach(),
+            'sim_align': sim_align.detach(),
         }
 
         if return_aux:

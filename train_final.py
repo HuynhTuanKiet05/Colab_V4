@@ -97,14 +97,17 @@ def _smoothstep(x):
     return x * x * (3.0 - 2.0 * x)
 
 
-def _ramp(epoch, start, end):
+def _ramp(progress, start, end):
     if end <= start:
-        return 1.0 if epoch >= end else 0.0
-    return _smoothstep((epoch - start) / (end - start))
+        return 1.0 if progress >= end else 0.0
+    return _smoothstep((progress - start) / (end - start))
 
 
 def compute_phase(epoch, args):
     step = epoch + 1
+    progress = step / max(1, args.epochs)
+    warm_end = args.warmup_epochs / max(1, args.epochs)
+
     if step <= args.warmup_epochs:
         return {
             'ranking_weight': 0.0,
@@ -114,21 +117,18 @@ def compute_phase(epoch, args):
             'use_focal': False,
         }
 
-    # Monotonic schedule only; no cyclic reactivation to avoid periodic loss spikes.
-    progress = step / max(1, args.epochs)
-    warm_end = args.warmup_epochs / max(1, args.epochs)
-
-    ranking_ramp = _ramp(progress, warm_end + 0.05, warm_end + 0.40)
-    contrastive_ramp = _ramp(progress, warm_end + 0.02, warm_end + 0.30)
-    hard_ramp = _ramp(progress, warm_end + 0.20, warm_end + 0.55)
+    # Strictly monotonic schedule: all auxiliary objectives only increase or decrease once.
+    ranking_ramp = _ramp(progress, warm_end + 0.06, warm_end + 0.46)
+    contrastive_ramp = _ramp(progress, warm_end + 0.03, warm_end + 0.34)
+    hard_ramp = _ramp(progress, warm_end + 0.18, warm_end + 0.58)
 
     ranking_weight = args.ranking_weight * ranking_ramp
-    contrastive_weight = args.contrastive_weight * (1.0 - 0.35 * contrastive_ramp)
-    hard_negative_weight = args.hard_negative_weight * (0.15 + 0.85 * hard_ramp)
+    contrastive_weight = args.contrastive_weight * (1.0 - 0.70 * contrastive_ramp)
+    hard_negative_weight = args.hard_negative_weight * (0.10 + 0.90 * hard_ramp)
 
-    if progress < warm_end + 0.30:
+    if progress < warm_end + 0.35:
         label_smoothing = args.label_smoothing
-    elif progress < warm_end + 0.60:
+    elif progress < warm_end + 0.70:
         label_smoothing = max(args.label_smoothing * 0.5, 0.001)
     else:
         label_smoothing = 0.0
@@ -418,6 +418,7 @@ if __name__ == '__main__':
 
             aux_losses = aux_losses or {}
             contrastive_loss = aux_losses.get('contrastive', train_score.new_tensor(0.0))
+            contrastive_loss = torch.clamp(contrastive_loss, min=0.0)
 
             use_focal = phase['use_focal']
             focal_objective = warm_focal_criterion if use_focal else focal_criterion
@@ -427,12 +428,14 @@ if __name__ == '__main__':
                 class_weights,
                 focal_objective,
                 phase['label_smoothing'],
-                min(phase['hard_negative_weight'], 1.0),
+                min(phase['hard_negative_weight'], 0.75),
                 use_focal,
             )
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
             hard_neg_loss = hard_negative_mining_loss(train_score, Y_train)
-            train_loss = classification_loss + phase['ranking_weight'] * ranking_loss + phase['contrastive_weight'] * contrastive_loss + 0.25 * phase['hard_negative_weight'] * hard_neg_loss
+            hard_neg_loss = torch.clamp(hard_neg_loss, min=0.0)
+            aux_total = phase['ranking_weight'] * ranking_loss + phase['contrastive_weight'] * contrastive_loss + 0.20 * phase['hard_negative_weight'] * hard_neg_loss
+            train_loss = classification_loss + aux_total
 
             optimizer.zero_grad()
             train_loss.backward()
@@ -443,10 +446,12 @@ if __name__ == '__main__':
 
             if (epoch + 1) % args.log_every == 0 or epoch == 0:
                 elapsed = timeit.default_timer() - start
+                aux_ratio = float((aux_total.detach() / classification_loss.detach().clamp_min(1e-8)).item())
                 print(
                     f'Epoch {epoch + 1:4d} | {elapsed:7.2f}s | loss {train_loss.item():.5f} | '
-                    f'cls {classification_loss.item():.5f} | rank {ranking_loss.item():.5f} | '
-                    f'ctr {contrastive_loss.item():.5f} | lr {scheduler.get_last_lr()[0]:.6e}'
+                    f'cls {classification_loss.item():.5f} | aux {aux_total.item():.5f} | '
+                    f'rank {ranking_loss.item():.5f} | ctr {contrastive_loss.item():.5f} | '
+                    f'hard {hard_neg_loss.item():.5f} | aux/cls {aux_ratio:.4f} | lr {scheduler.get_last_lr()[0]:.6e}'
                 )
 
             should_score = (epoch + 1) >= args.eval_start_epoch and ((epoch + 1 - args.eval_start_epoch) % max(1, args.score_every) == 0)
