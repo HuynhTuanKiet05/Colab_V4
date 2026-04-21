@@ -133,6 +133,11 @@ Nen chay smoke test truoc khi train 1000 epoch.
 
 Neu smoke test pass, moi chay train dai.
 
+Mac dinh `train_final.py` hien da bat early stopping:
+
+- neu AUC khong cai thien trong `180` epoch thi train se tu dung
+- co the doi nguong bang `--patience`
+
 ## 5. Train ban improved
 
 Day la lenh train theo bo tham so da su dung:
@@ -142,6 +147,7 @@ Day la lenh train theo bo tham so da su dung:
 !python train_final.py \
   --epochs 1000 \
   --k_fold 10 \
+  --patience 180 \
   --neighbor 20 \
   --lr 0.0005 \
   --weight_decay 0.0001 \
@@ -169,6 +175,7 @@ drive.mount('/content/drive')
 !python train_final.py \
   --epochs 1000 \
   --k_fold 10 \
+  --patience 180 \
   --neighbor 20 \
   --lr 0.0005 \
   --weight_decay 0.0001 \

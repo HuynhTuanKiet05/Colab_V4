@@ -21,6 +21,7 @@ def parse_args():
     parser.add_argument('--warmup-epochs', type=int, default=None)
     parser.add_argument('--target-auc-warmup', type=int, default=None)
     parser.add_argument('--score-every', type=int, default=None)
+    parser.add_argument('--patience', type=int, default=None)
     parser.add_argument('--neighbor', type=int, default=None)
     parser.add_argument('--lr', type=float, default=None)
     return parser.parse_args()
@@ -44,6 +45,7 @@ def build_preset(args):
             'warmup_epochs': 1,
             'target_auc_warmup': 1,
             'score_every': 1,
+            'patience': 0,
             'neighbor': 5,
             'lr': 3e-4,
         },
@@ -53,6 +55,7 @@ def build_preset(args):
             'warmup_epochs': 40,
             'target_auc_warmup': 60,
             'score_every': 1,
+            'patience': 180,
             'neighbor': 10,
             'lr': 3e-4,
         },
@@ -62,12 +65,13 @@ def build_preset(args):
             'warmup_epochs': 250,
             'target_auc_warmup': 400,
             'score_every': 1,
+            'patience': 180,
             'neighbor': 10,
             'lr': 3e-4,
         },
     }
     config = presets[args.preset]
-    for key in ['epochs', 'k_fold', 'warmup_epochs', 'target_auc_warmup', 'score_every', 'neighbor', 'lr']:
+    for key in ['epochs', 'k_fold', 'warmup_epochs', 'target_auc_warmup', 'score_every', 'patience', 'neighbor', 'lr']:
         override = getattr(args, key)
         if override is not None:
             config[key] = override
@@ -111,6 +115,7 @@ def main():
         '--warmup_epochs', str(preset['warmup_epochs']),
         '--target_auc_warmup', str(preset['target_auc_warmup']),
         '--score_every', str(preset['score_every']),
+        '--patience', str(preset['patience']),
         '--neighbor', str(preset['neighbor']),
         '--lr', str(preset['lr']),
     ]

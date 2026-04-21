@@ -160,7 +160,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_checkpoints", action=argparse.BooleanOptionalAction, default=False, help="save model checkpoints")
     parser.add_argument("--eval_start_epoch", default=1, type=int, help="minimum epoch before evaluation begins")
     parser.add_argument("--score_every", default=1, type=int, help="evaluate every N epochs after eval_start_epoch")
-    parser.add_argument("--patience", default=0, type=int, help="early stopping patience in evaluation steps; <=0 disables early stopping")
+    parser.add_argument("--patience", default=180, type=int, help="early stopping patience in epochs without AUC improvement; <=0 disables early stopping")
     parser.add_argument("--lambda_cl", default=0.1, type=float, help="weight for contrastive alignment loss")
     parser.add_argument("--temperature", default=0.5, type=float, help="temperature for contrastive loss")
     parser.add_argument("--disable_scheduler", action="store_true", help="disable ReduceLROnPlateau scheduler")
@@ -313,7 +313,7 @@ if __name__ == "__main__":
             "MCC": 0.0,
             "epoch": 0,
         }
-        no_improve_steps = 0
+        no_improve_epochs = 0
         start = timeit.default_timer()
 
         for epoch in range(args.epochs):
@@ -400,7 +400,7 @@ if __name__ == "__main__":
                             "epoch": epoch + 1,
                         }
                     )
-                    no_improve_steps = 0
+                    no_improve_epochs = 0
                     if args.save_checkpoints:
                         checkpoint_path = os.path.join(args.result_dir, f"best_model_{args.model_tag}_fold{fold_idx}.pth")
                         save_checkpoint(checkpoint_path, model, optimizer, scheduler, fold_idx, epoch + 1, best_fold, args)
@@ -422,10 +422,13 @@ if __name__ == "__main__":
                             best_overall_auc = float(auc)
                     logging.info(f"AUC improved at epoch {epoch + 1} ;\tbest_auc: {auc:.5f}")
                 else:
-                    no_improve_steps += max(1, args.score_every)
+                    no_improve_epochs += max(1, args.score_every)
 
-                if args.patience > 0 and no_improve_steps >= args.patience:
-                    logging.info(f"Early stopping at epoch {epoch + 1} after {no_improve_steps} epochs without AUC improvement.")
+                if args.patience > 0 and no_improve_epochs >= args.patience:
+                    logging.info(
+                        f"Early stopping at epoch {epoch + 1} after "
+                        f"{no_improve_epochs} epochs without AUC improvement."
+                    )
                     break
             elif (epoch + 1) % max(1, args.log_every) == 0:
                 elapsed = timeit.default_timer() - start
