@@ -143,6 +143,32 @@ def configure_logging(result_dir):
     return log_file
 
 
+def build_results_dataframe(best_epochs, aucs, auprs, accs, precs, recs, f1s, mccs):
+    results_df = pd.DataFrame(
+        {
+            "Fold": [f"Fold {i}" for i in range(len(aucs))],
+            "Best_Epoch": best_epochs,
+            "AUC": aucs,
+            "AUPR": auprs,
+            "Accuracy": accs,
+            "Precision": precs,
+            "Recall": recs,
+            "F1-score": f1s,
+            "Mcc": mccs,
+        }
+    )
+
+    metrics_only = results_df.drop(columns=["Fold", "Best_Epoch"])
+    summary_df = pd.DataFrame(
+        [
+            ["Mean", ""] + metrics_only.mean().tolist(),
+            ["Std", ""] + metrics_only.std().tolist(),
+        ],
+        columns=results_df.columns,
+    )
+    return pd.concat([results_df, summary_df], ignore_index=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--k_fold", type=int, default=10, help="k-fold cross validation")
@@ -453,46 +479,18 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    results_df = pd.DataFrame(
-        {
-            "Fold": [f"Fold {i}" for i in range(len(aucs))],
-            "Best_Epoch": best_epochs,
-            "AUC": aucs,
-            "AUPR": auprs,
-            "Accuracy": accs,
-            "Precision": precs,
-            "Recall": recs,
-            "F1-score": f1s,
-            "Mcc": mccs,
-            "ModelTag": [args.model_tag for _ in aucs],
-        }
-    )
-    summary_df = pd.DataFrame(
-        {
-            "Fold": ["Mean", "Std"],
-            "Best_Epoch": ["", ""],
-            "AUC": [np.mean(aucs), np.std(aucs)],
-            "AUPR": [np.mean(auprs), np.std(auprs)],
-            "Accuracy": [np.mean(accs), np.std(accs)],
-            "Precision": [np.mean(precs), np.std(precs)],
-            "Recall": [np.mean(recs), np.std(recs)],
-            "F1-score": [np.mean(f1s), np.std(f1s)],
-            "Mcc": [np.mean(mccs), np.std(mccs)],
-            "ModelTag": [args.model_tag, args.model_tag],
-        }
-    )
-    final_df = pd.concat([results_df, summary_df], ignore_index=True)
+    final_df = build_results_dataframe(best_epochs, aucs, auprs, accs, precs, recs, f1s, mccs)
 
     output_csv = os.path.join(args.result_dir, f"{max_folds}_fold_results_{args.model_tag}.csv")
     final_df.to_csv(output_csv, index=False)
     logging.info(f'\n{"=" * 60}')
     logging.info("FINAL RESULTS SUMMARY (REFERENCE-ALIGNED PIPELINE)")
     logging.info(f'{"=" * 60}')
+    logging.info(f"\n{final_df.to_string(index=False)}")
     logging.info(f"AUC: {aucs}")
     logging.info(f"Mean AUC: {float(np.mean(aucs)):.5f} (+/- {float(np.std(aucs)):.5f})")
     logging.info(f"AUPR: {auprs}")
     logging.info(f"Mean AUPR: {float(np.mean(auprs)):.5f} (+/- {float(np.std(auprs)):.5f})")
-    logging.info(f"\n{summary_df.to_string(index=False)}")
     logging.info(f"Saved improved results to: {output_csv}")
 
     if args.save_checkpoints and best_overall_payload is not None:
