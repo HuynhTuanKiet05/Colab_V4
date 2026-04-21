@@ -151,7 +151,8 @@ class RLGHGTLayer(nn.Module):
             if self.use_metapath:
                 graphs_for_target = None if metapath_cache is None else metapath_cache.get(ntype)
                 meta_msg = self._metapath_message(g, h_dict, ntype, graphs_for_target)
-                meta = self.meta_gate[ntype](torch.cat([h_dict[ntype], meta_msg], dim=-1))
+                meta_gate = self.meta_gate[ntype](torch.cat([h_dict[ntype], meta_msg], dim=-1))
+                meta = meta_gate * meta_msg
             else:
                 meta = torch.zeros_like(local)
 

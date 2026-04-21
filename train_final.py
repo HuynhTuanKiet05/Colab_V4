@@ -110,6 +110,10 @@ def apply_dataset_preset(args):
     args.topo_feat_dim = 7
 
 
+def build_model_tag(args):
+    return f"{args.assoc_backbone}_{args.fusion_mode}_{args.pair_mode}_{args.gate_mode}"
+
+
 def save_checkpoint(path, model, optimizer, scheduler, fold_idx, epoch, best_metrics, args):
     checkpoint = {
         "fold": fold_idx,
@@ -147,6 +151,15 @@ if __name__ == "__main__":
     parser.add_argument("--disable_scheduler", action="store_true", help="disable ReduceLROnPlateau scheduler")
     parser.add_argument("--topo_hidden", default=None, type=int, help="hidden dimension for topology encoder")
     parser.add_argument("--fold_limit", type=int, default=None, help="optional limit on number of folds to execute")
+    parser.add_argument("--assoc_backbone", choices=["vanilla_hgt", "rlghgt"], default="rlghgt", help="association encoder backbone")
+    parser.add_argument("--fusion_mode", choices=["mva", "mva_fuzzy"], default="mva_fuzzy", help="node-view fusion strategy")
+    parser.add_argument("--pair_mode", choices=["mul_mlp", "interaction"], default="interaction", help="pair scoring head")
+    parser.add_argument("--gate_mode", choices=["scalar", "vector"], default="vector", help="fuzzy gate output type")
+    parser.add_argument("--gate_bias_init", default=-2.0, type=float, help="initial bias for fuzzy gate")
+    parser.add_argument("--use_relation_attention", action=argparse.BooleanOptionalAction, default=True, help="enable relation-aware attention in RLGHGT")
+    parser.add_argument("--use_metapath", action=argparse.BooleanOptionalAction, default=True, help="enable metapath branch in RLGHGT")
+    parser.add_argument("--use_global_hgt", action=argparse.BooleanOptionalAction, default=True, help="enable global context branch in RLGHGT")
+    parser.add_argument("--use_topological", action=argparse.BooleanOptionalAction, default=True, help="enable topology projection branch in RLGHGT")
 
     parser.add_argument("--hgt_in_dim", default=None, type=int, help="HGT input dimension")
     parser.add_argument("--hgt_layer", default=None, type=int, help="HGT layers")
@@ -190,6 +203,7 @@ if __name__ == "__main__":
     default_result_dir = Path("Result") / "improved" / args.dataset
     args.data_dir = str(Path(args.data_root) if args.data_root else default_data_dir)
     args.result_dir = str(Path(args.result_root) if args.result_root else default_result_dir)
+    args.model_tag = build_model_tag(args)
 
     validate_data_dir(args.data_dir)
     os.makedirs(args.result_dir, exist_ok=True)
@@ -200,6 +214,11 @@ if __name__ == "__main__":
     print(f"Save checkpoints: {args.save_checkpoints}")
     print(f"Early stopping patience: {args.patience}")
     print(f"Contrastive weight lambda_cl: {args.lambda_cl}")
+    print(
+        "Model config: "
+        f"tag={args.model_tag} | assoc={args.assoc_backbone} | fusion={args.fusion_mode} | "
+        f"pair={args.pair_mode} | gate={args.gate_mode}"
+    )
 
     data = get_data(args)
     args.drug_number = data["drug_number"]
@@ -351,7 +370,7 @@ if __name__ == "__main__":
                     )
                     no_improve_steps = 0
                     if args.save_checkpoints:
-                        checkpoint_path = os.path.join(args.result_dir, f"best_model_fold{fold_idx}.pth")
+                        checkpoint_path = os.path.join(args.result_dir, f"best_model_{args.model_tag}_fold{fold_idx}.pth")
                         save_checkpoint(checkpoint_path, model, optimizer, scheduler, fold_idx, epoch + 1, best_fold, args)
                         if auc > best_overall_auc:
                             best_overall_auc = float(auc)
@@ -369,7 +388,12 @@ if __name__ == "__main__":
                     else:
                         if auc > best_overall_auc:
                             best_overall_auc = float(auc)
-                    print(f"Best fold AUC improved to {auc:.5f} at epoch {epoch + 1} | {diagnostics}")
+                    print(
+                        f"Best fold AUC improved to {auc:.5f} at epoch {epoch + 1} | "
+                        f"drug_gate={diagnostics.get('drug_gate_mean', 0.0):.4f} | "
+                        f"disease_gate={diagnostics.get('disease_gate_mean', 0.0):.4f} | "
+                        f"drug_assoc_norm={diagnostics.get('drug_assoc_norm', 0.0):.4f}"
+                    )
                 else:
                     no_improve_steps += max(1, args.score_every)
 
@@ -409,6 +433,7 @@ if __name__ == "__main__":
             "Recall": recs,
             "F1-score": f1s,
             "Mcc": mccs,
+            "ModelTag": [args.model_tag for _ in aucs],
         }
     )
     summary_df = pd.DataFrame(
@@ -422,11 +447,12 @@ if __name__ == "__main__":
             "Recall": [np.mean(recs), np.std(recs)],
             "F1-score": [np.mean(f1s), np.std(f1s)],
             "Mcc": [np.mean(mccs), np.std(mccs)],
+            "ModelTag": [args.model_tag, args.model_tag],
         }
     )
     final_df = pd.concat([results_df, summary_df], ignore_index=True)
 
-    output_csv = os.path.join(args.result_dir, f"{max_folds}_fold_results_improved.csv")
+    output_csv = os.path.join(args.result_dir, f"{max_folds}_fold_results_{args.model_tag}.csv")
     final_df.to_csv(output_csv, index=False)
     print("\n==============================")
     print("FINAL RESULTS SUMMARY (REFERENCE-ALIGNED PIPELINE)")
@@ -435,6 +461,6 @@ if __name__ == "__main__":
     print(f"\nSaved improved results to: {output_csv}")
 
     if args.save_checkpoints and best_overall_payload is not None:
-        overall_path = os.path.join(args.result_dir, "best_model.pth")
+        overall_path = os.path.join(args.result_dir, f"best_model_{args.model_tag}.pth")
         torch.save(best_overall_payload, overall_path)
         print(f"Saved best overall checkpoint to: {overall_path}")
