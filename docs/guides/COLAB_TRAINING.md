@@ -1,6 +1,6 @@
 # Google Colab Training Guide
 
-Huong dan nay gom dung quy trinh da debug de chay repo `Colab_V2` tren Google Colab Linux.
+Huong dan nay gom dung quy trinh da debug de chay repo `Colab_V4` tren Google Colab Linux.
 
 Tai lieu nay uu tien:
 
@@ -31,16 +31,16 @@ print(platform.platform())
 
 ```python
 %cd /content
-!rm -rf /content/Colab_V2
-!git clone https://github.com/DucTri2207/Colab_V2.git
-%cd /content/Colab_V2
+!rm -rf /content/Colab_V4
+!git clone https://github.com/HuynhTuanKiet05/Colab_V4.git
+%cd /content/Colab_V4
 !git log --oneline -1
 ```
 
 Neu ban da co repo san va chi muon cap nhat:
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !git pull origin main
 ```
 
@@ -51,7 +51,7 @@ Khong nen dua het vao mot shell script khi runtime Colab dang co nhieu package h
 ### 2.1. Go cac goi cu
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !pip uninstall -y torch torchvision torchaudio dgl dglgo torchdata numpy pandas scikit-learn networkx
 ```
 
@@ -75,7 +75,7 @@ Sau khi runtime len lai, chay tiep.
 ### 2.4. Cai cac package train
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !pip install --no-cache-dir --force-reinstall \
   numpy==1.26.4 \
   pandas==2.2.2 \
@@ -106,7 +106,7 @@ os.kill(os.getpid(), signal.SIGKILL)
 Khong dung heredoc `python - <<'PY'` trong notebook neu khong can thiet. Cu import truc tiep trong cell Python de de debug hon.
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 import torch, dgl, numpy, pandas, sklearn, networkx, torchdata
 
 print("torch:", torch.__version__)
@@ -127,7 +127,7 @@ Neu cell tren chay duoc thi moi truong da on.
 Nen chay smoke test truoc khi train 1000 epoch.
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !python scripts/colab_train.py --dataset C-dataset --preset smoke
 ```
 
@@ -140,22 +140,24 @@ Mac dinh `train_final.py` hien da bat early stopping:
 
 ## 5. Train ban improved
 
-Day la lenh train theo bo tham so da su dung:
+`train_final.py` hien da co san `DATASET_PRESETS` cho B / C / F va bat mac dinh
+phase A + B + C1 (AdamW + LR warmup + focal loss + EMA + ranking loss + BUG-09
+fix). Khong can truyen tay `--lr`, `--neighbor`, `--hgt_layer`, ...; chi can
+chi dinh dataset va `--save_checkpoints`:
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !python train_final.py \
-  --epochs 1000 \
-  --k_fold 10 \
-  --patience 180 \
-  --neighbor 20 \
-  --lr 0.0005 \
-  --weight_decay 0.0001 \
-  --hgt_layer 3 \
-  --hgt_in_dim 128 \
   --dataset C-dataset \
-  --device cuda
+  --k_fold 10 \
+  --epochs 1000 \
+  --patience 180 \
+  --device cuda \
+  --save_checkpoints
 ```
+
+Neu muon tat bot tinh nang de so sanh ablation, them flag `--no-use_focal`,
+`--no-use_ema`, `--no-use_ranking`, `--no-filter_assoc_positives_only`, v.v.
 
 ## 6. Train va luu ket qua len Google Drive
 
@@ -171,19 +173,15 @@ drive.mount('/content/drive')
 ### 6.2. Train va ghi ket qua ra Drive
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !python train_final.py \
-  --epochs 1000 \
-  --k_fold 10 \
-  --patience 180 \
-  --neighbor 20 \
-  --lr 0.0005 \
-  --weight_decay 0.0001 \
-  --hgt_layer 3 \
-  --hgt_in_dim 128 \
   --dataset C-dataset \
+  --k_fold 10 \
+  --epochs 1000 \
+  --patience 180 \
   --device cuda \
-  --result_root /content/drive/MyDrive/Colab_V2_runs/C-dataset_run1
+  --save_checkpoints \
+  --result_root /content/drive/MyDrive/Colab_V4_runs/C-dataset_run1
 ```
 
 ## 7. Neu muon chay ban goc AMDGT
@@ -191,7 +189,7 @@ drive.mount('/content/drive')
 Neu ban muon bam dung script goc `train_DDA.py` thay vi ban improved:
 
 ```python
-%cd /content/Colab_V2/AMDGT_original
+%cd /content/Colab_V4/AMDGT_original
 
 !python train_DDA.py \
   --epochs 1000 \
@@ -206,7 +204,7 @@ Neu ban muon bam dung script goc `train_DDA.py` thay vi ban improved:
 
 ## 8. Cac loi da gap va cach xu ly
 
-### 8.1. `No such file or directory: /content/Colab_V2`
+### 8.1. `No such file or directory: /content/Colab_V4`
 
 Repo chua duoc clone.
 
@@ -214,8 +212,8 @@ Chay lai:
 
 ```python
 %cd /content
-!git clone https://github.com/DucTri2207/Colab_V2.git
-%cd /content/Colab_V2
+!git clone https://github.com/HuynhTuanKiet05/Colab_V4.git
+%cd /content/Colab_V4
 ```
 
 ### 8.2. `ModuleNotFoundError: No module named 'dgl'`
@@ -239,7 +237,7 @@ Day la loi tuong thich giua code cu va `networkx` moi.
 Da duoc fix trong repo. Chi can:
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !git pull origin main
 ```
 
@@ -250,7 +248,7 @@ Day la loi API DGL cu. Repo da duoc fix de dung DGL 2.x.
 Chi can:
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !git pull origin main
 ```
 
@@ -258,7 +256,25 @@ Chi can:
 
 Thuong la package cu bi doi ten trong runtime Colab. Neu `torch`, `dgl` va smoke test van pass thi co the bo qua.
 
-### 8.6. Warning dependency conflict cua Colab
+### 8.6. `ModuleNotFoundError: No module named 'torchdata.datapipes'`
+
+Colab/Kaggle dang ship `torchdata>=0.10`, phien ban nay da bo submodule
+`datapipes`, trong khi DGL 2.x van can `from torchdata.datapipes.iter import
+IterDataPipe`.
+
+Giai phap: pin `torchdata<0.10` truoc khi import DGL, roi restart runtime:
+
+```python
+!pip install -q "torchdata<0.10"
+import os
+os.kill(os.getpid(), 9)
+```
+
+Sau khi runtime khoi dong lai, chay tiep cac cell install / train nhu binh
+thuong. Notebook `scripts/kaggle_notebook.ipynb` da tu lo buoc pin nay o
+Cell 2.
+
+### 8.7. Warning dependency conflict cua Colab
 
 Colab co rat nhieu package he thong khong lien quan den train model.
 
