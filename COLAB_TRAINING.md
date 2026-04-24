@@ -1,19 +1,26 @@
 # Google Colab Training Guide
 
-Huong dan nay gom dung quy trinh da debug de chay repo `Colab_V2` tren Google Colab Linux.
+Huong dan nay duoc viet lai cho repo `Colab_V4` va pipeline hien tai trong [train_final.py](C:/xampp/htdocs/DoANBase_Final/CaiTien_HGT_repo/train_final.py).
+
+Mac dinh train hien tai:
+
+- `assoc_backbone=vanilla_hgt`
+- `fusion_mode=mva`
+- `pair_mode=mul_mlp`
+- `gate_mode=vector`
+- `dataset=C-dataset`
 
 Tai lieu nay uu tien:
 
 - clone repo sach
-- cai moi truong on dinh
+- cai moi truong on dinh tren Colab GPU
 - restart runtime dung luc
 - smoke test truoc khi train dai
-- train bang `train_final.py`
-- xu ly cac loi Colab da gap trong qua trinh debug
+- luu log va checkpoint len Google Drive
 
-## 0. Chuan bi
+## 0. Chuan bi runtime
 
-Truoc khi chay, vao:
+Vao:
 
 - `Runtime -> Change runtime type`
 - chon `GPU`
@@ -22,92 +29,147 @@ Kiem tra nhanh:
 
 ```python
 !nvidia-smi
-import sys, platform
+import sys, platform, torch
 print(sys.version)
 print(platform.platform())
+print("cuda available:", torch.cuda.is_available())
 ```
 
-## 1. Clone repo sach tu dau
+Neu `!nvidia-smi` khong ra GPU hoac `torch.cuda.is_available()` la `False` thi khong nen chay `--device cuda`.
+
+## 1. Clone repo sach
 
 ```python
 %cd /content
-!rm -rf /content/Colab_V2
-!git clone https://github.com/DucTri2207/Colab_V2.git
-%cd /content/Colab_V2
+!rm -rf /content/Colab_V4
+!git clone https://github.com/DucTri2207/Colab_V4.git
+%cd /content/Colab_V4
 !git log --oneline -1
 ```
 
-Neu ban da co repo san va chi muon cap nhat:
+Neu repo da ton tai va chi muon cap nhat dung ban moi nhat:
 
 ```python
-%cd /content/Colab_V2
-!git pull origin main
+%cd /content/Colab_V4
+!git fetch origin
+!git reset --hard origin/main
+!git log --oneline -1
 ```
 
-## 2. Cai moi truong
-
-Khong nen dua het vao mot shell script khi runtime Colab dang co nhieu package he thong. Cach on dinh nhat la cai theo tung khoi rieng.
-
-### 2.1. Go cac goi cu
+Neu ban muon mot cell an toan de dam bao thu muc `/content/Colab_V4` luon ton tai truoc moi buoc setup/train, dung cell nay:
 
 ```python
-%cd /content/Colab_V2
-!pip uninstall -y torch torchvision torchaudio dgl dglgo torchdata numpy pandas scikit-learn networkx
+import os
+
+%cd /content
+
+if not os.path.exists("/content/Colab_V4"):
+    !git clone https://github.com/DucTri2207/Colab_V4.git
+else:
+    print("Repo da ton tai, cap nhat ban moi nhat...")
+    %cd /content/Colab_V4
+    !git fetch origin
+    !git reset --hard origin/main
+    %cd /content
+
+%cd /content/Colab_V4
+!git log --oneline -1
 ```
 
-### 2.2. Cai PyTorch
+## 2. Kiem tra thu muc dang co tren Colab
+
+Neu bi loi `No such file or directory`, kiem tra nhanh:
 
 ```python
-!pip install --no-cache-dir --force-reinstall \
+!pwd
+!ls /content
+!find /content -maxdepth 2 -type d | sort
+```
+
+## 3. Cai moi truong
+
+### Cach nhanh khuyen nghi
+
+Truoc tien, chay lai cell dam bao repo ton tai neu day la runtime moi hoac ban vua `Disconnect and delete runtime`.
+
+```python
+import os
+
+%cd /content
+
+if not os.path.exists("/content/Colab_V4"):
+    !git clone https://github.com/DucTri2207/Colab_V4.git
+else:
+    print("Repo da ton tai, cap nhat ban moi nhat...")
+    %cd /content/Colab_V4
+    !git fetch origin
+    !git reset --hard origin/main
+    %cd /content
+
+%cd /content/Colab_V4
+!git log --oneline -1
+```
+
+Sau do moi setup:
+
+```python
+%cd /content/Colab_V4
+!bash scripts/colab_setup.sh
+```
+
+Sau do restart runtime:
+
+```python
+import os, signal
+os.kill(os.getpid(), signal.SIGKILL)
+```
+
+Khi runtime len lai:
+
+```python
+import os
+
+%cd /content
+
+if not os.path.exists("/content/Colab_V4"):
+    !git clone https://github.com/DucTri2207/Colab_V4.git
+else:
+    %cd /content/Colab_V4
+    !git fetch origin
+    !git reset --hard origin/main
+    %cd /content
+
+%cd /content/Colab_V4
+```
+
+### Neu `colab_setup.sh` loi, cai thu cong
+
+```python
+%cd /content/Colab_V4
+!python -m pip install --upgrade pip setuptools wheel
+!python -m pip uninstall -y torch torchvision torchaudio dgl dglgo torchdata
+!python -m pip install --no-cache-dir --force-reinstall \
   torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 \
   --index-url https://download.pytorch.org/whl/cu121
-```
-
-### 2.3. Restart runtime
-
-```python
-import os, signal
-os.kill(os.getpid(), signal.SIGKILL)
-```
-
-Sau khi runtime len lai, chay tiep.
-
-### 2.4. Cai cac package train
-
-```python
-%cd /content/Colab_V2
-!pip install --no-cache-dir --force-reinstall \
-  numpy==1.26.4 \
-  pandas==2.2.2 \
-  scikit-learn==1.6.1 \
-  networkx==3.2.1 \
-  torchdata==0.8.0 \
-  pyTelegramBotAPI \
-  "jedi>=0.19.1"
-```
-
-### 2.5. Cai DGL
-
-```python
-!pip install --no-cache-dir --force-reinstall \
+!python -m pip install --no-cache-dir --force-reinstall \
   dgl==2.4.0+cu121 \
   -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
+!python -m pip install --no-cache-dir --force-reinstall -r requirements-colab.txt
 ```
 
-### 2.6. Restart runtime lan nua
+Restart runtime sau khi cai xong:
 
 ```python
 import os, signal
 os.kill(os.getpid(), signal.SIGKILL)
 ```
 
-## 3. Kiem tra moi truong sau khi cai
-
-Khong dung heredoc `python - <<'PY'` trong notebook neu khong can thiet. Cu import truc tiep trong cell Python de de debug hon.
+## 4. Kiem tra moi truong sau khi cai
 
 ```python
-%cd /content/Colab_V2
-import torch, dgl, numpy, pandas, sklearn, networkx, torchdata
+%cd /content/Colab_V4
+!nvidia-smi
+import torch, dgl, numpy, pandas, sklearn, networkx, scipy
 
 print("torch:", torch.__version__)
 print("cuda:", torch.cuda.is_available())
@@ -117,7 +179,7 @@ print("numpy:", numpy.__version__)
 print("pandas:", pandas.__version__)
 print("sklearn:", sklearn.__version__)
 print("networkx:", networkx.__version__)
-print("torchdata:", torchdata.__version__)
+print("scipy:", scipy.__version__)
 ```
 
 Neu cell tren chay duoc thi moi truong da on.
@@ -127,142 +189,204 @@ Neu cell tren chay duoc thi moi truong da on.
 Nen chay smoke test truoc khi train 1000 epoch.
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !python scripts/colab_train.py --dataset C-dataset --preset smoke
 ```
 
-Neu smoke test pass, moi chay train dai.
+## 5. Mount Google Drive de luu ket qua
 
-Mac dinh `train_final.py` hien da bat early stopping:
-
-- neu AUC khong cai thien trong `180` epoch thi train se tu dung
-- co the doi nguong bang `--patience`
-
-## 5. Train ban improved
-
-Day la lenh train theo bo tham so da su dung:
-
-```python
-%cd /content/Colab_V2
-!python train_final.py \
-  --epochs 1000 \
-  --k_fold 10 \
-  --patience 180 \
-  --neighbor 20 \
-  --lr 0.0005 \
-  --weight_decay 0.0001 \
-  --hgt_layer 3 \
-  --hgt_in_dim 128 \
-  --dataset C-dataset \
-  --device cuda
-```
-
-## 6. Train va luu ket qua len Google Drive
-
-Nen mount Drive truoc khi chay dai de tranh mat checkpoint khi runtime ngat.
-
-### 6.1. Mount Drive
 
 ```python
 from google.colab import drive
 drive.mount('/content/drive')
+
+import os, time
+RUN_DIR = f"/content/drive/MyDrive/Colab_V4_runs/Cdataset_{time.strftime('%Y%m%d_%H%M%S')}"
+os.makedirs(RUN_DIR, exist_ok=True)
+print("RUN_DIR =", RUN_DIR)
 ```
 
-### 6.2. Train va ghi ket qua ra Drive
+Luu y:
+
+- Khong viet truc tiep `"{RUN_DIR}"` trong shell command neu chua tao f-string Python truoc.
+- Neu khong can luu len Drive, bo qua phan nay va khong truyen `--result_root`.
+
+## 6. Smoke test truoc khi train dai
+
+### Cach 1: smoke test truc tiep bang `train_final.py`
 
 ```python
-%cd /content/Colab_V2
+%cd /content/Colab_V4
 !python train_final.py \
-  --epochs 1000 \
-  --k_fold 10 \
-  --patience 180 \
-  --neighbor 20 \
-  --lr 0.0005 \
-  --weight_decay 0.0001 \
-  --hgt_layer 3 \
-  --hgt_in_dim 128 \
   --dataset C-dataset \
   --device cuda \
-  --result_root /content/drive/MyDrive/Colab_V2_runs/C-dataset_run1
+  --epochs 1 \
+  --k_fold 2 \
+  --fold_limit 1 \
+  --score_every 1 \
+  --eval_start_epoch 1 \
+  --no-save_checkpoints
 ```
 
-## 7. Neu muon chay ban goc AMDGT
-
-Neu ban muon bam dung script goc `train_DDA.py` thay vi ban improved:
+### Cach 2: dung launcher Colab
 
 ```python
-%cd /content/Colab_V2/AMDGT_original
+%cd /content/Colab_V4
+!python scripts/colab_train.py --dataset C-dataset --preset smoke --device cuda
+```
 
-!python train_DDA.py \
+Neu smoke test pass, moi chay train dai.
+
+## 7. Train ban mac dinh cua `Colab_V4`
+
+Day la lenh train dung bo tham so `C-dataset` hien tai:
+
+```python
+%cd /content/Colab_V4
+cmd = f"""
+python train_final.py \
+  --dataset C-dataset \
+  --device cuda \
   --epochs 1000 \
   --k_fold 10 \
-  --neighbor 20 \
-  --lr 0.0005 \
-  --weight_decay 0.0001 \
-  --hgt_layer 3 \
-  --hgt_in_dim 128 \
-  --dataset C-dataset
+  --neighbor 5 \
+  --lr 1e-4 \
+  --weight_decay 1e-3 \
+  --hgt_layer 2 \
+  --hgt_in_dim 256 \
+  --hgt_head_dim 32 \
+  --gt_out_dim 256 \
+  --save_checkpoints \
+  --result_root "{RUN_DIR}"
+"""
+print(cmd)
+!{cmd} 2>&1 | tee -a "{RUN_DIR}/console.log"
 ```
 
-## 8. Cac loi da gap va cach xu ly
+## 8. Train bien the `rvg` de doi chieu
 
-### 8.1. `No such file or directory: /content/Colab_V2`
-
-Repo chua duoc clone.
-
-Chay lai:
+Neu muon test nhanh fuzzy residual gate:
 
 ```python
+%cd /content/Colab_V4
+!python train_final.py \
+  --dataset C-dataset \
+  --device cuda \
+  --epochs 1000 \
+  --k_fold 10 \
+  --neighbor 5 \
+  --lr 1e-4 \
+  --weight_decay 1e-3 \
+  --hgt_layer 2 \
+  --hgt_in_dim 256 \
+  --hgt_head_dim 32 \
+  --gt_out_dim 256 \
+  --fusion_mode rvg \
+  --pair_mode mul_mlp \
+  --gate_mode vector \
+  --save_checkpoints \
+  --result_root "{RUN_DIR}/rvg_run"
+```
+
+## 9. Dung launcher `scripts/colab_train.py`
+
+Launcher nay la mot wrapper cho Colab. Vi du:
+
+```python
+%cd /content/Colab_V4
+!python scripts/colab_train.py --dataset C-dataset --preset full --device cuda --mount-drive
+```
+
+Preset co san:
+
+- `smoke`
+- `standard`
+- `full`
+
+## 10. Cac loi da gap va cach xu ly
+
+### 10.1. `No such file or directory: /content/Colab_V4`
+
+Repo chua duoc clone hoac dang o ten thu muc khac.
+
+```python
+!ls /content
 %cd /content
-!git clone https://github.com/DucTri2207/Colab_V2.git
-%cd /content/Colab_V2
+!git clone https://github.com/DucTri2207/Colab_V4.git
+%cd /content/Colab_V4
 ```
 
-### 8.2. `ModuleNotFoundError: No module named 'dgl'`
+### 10.2. `python3: can't open file '/content/train_final.py'`
 
-DGL chua cai hoac cai hong.
+Thuong la do `%cd /content/Colab_V4` da that bai, nen notebook van dang o `/content`.
 
-Chay lai:
+Chay:
 
 ```python
-!pip install --no-cache-dir --force-reinstall \
+!pwd
+!ls /content
+```
+
+### 10.3. `Found no NVIDIA driver on your system`
+
+Ban dang chay `--device cuda` nhung runtime hien tai khong co GPU.
+
+Kiem tra:
+
+```python
+!nvidia-smi
+import torch
+print(torch.cuda.is_available())
+```
+
+Neu khong co GPU, doi tam sang:
+
+```python
+--device cpu
+```
+
+### 10.4. `Missing dataset files in AMDGT_original/data/c-dataset`
+
+Linux phan biet hoa thuong. Dung:
+
+```python
+--dataset C-dataset
+```
+
+khong dung:
+
+```python
+--dataset c-dataset
+```
+
+### 10.5. `tee: {RUN_DIR}/console.log: No such file or directory`
+
+Ban dang truyen literal string `{RUN_DIR}` thay vi f-string Python.
+
+Dung theo mau:
+
+```python
+cmd = f"""python train_final.py --result_root "{RUN_DIR}" """
+!{cmd} 2>&1 | tee -a "{RUN_DIR}/console.log"
+```
+
+### 10.6. `ModuleNotFoundError: No module named 'dgl'`
+
+DGL chua cai hoac cai hong. Chay lai:
+
+```python
+!python -m pip install --no-cache-dir --force-reinstall \
   dgl==2.4.0+cu121 \
   -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
 ```
 
 Sau do restart runtime.
 
-### 8.3. `module 'networkx' has no attribute 'from_numpy_matrix'`
+### 10.7. Warning dependency conflict cua Colab
 
-Day la loi tuong thich giua code cu va `networkx` moi.
+Colab co nhieu package he thong khong lien quan den train.
 
-Da duoc fix trong repo. Chi can:
-
-```python
-%cd /content/Colab_V2
-!git pull origin main
-```
-
-### 8.4. `module 'dgl.function' has no attribute 'src_mul_edge'`
-
-Day la loi API DGL cu. Repo da duoc fix de dung DGL 2.x.
-
-Chi can:
-
-```python
-%cd /content/Colab_V2
-!git pull origin main
-```
-
-### 8.5. Warning `Ignoring invalid distribution ~vidia-cublas-cu12`
-
-Thuong la package cu bi doi ten trong runtime Colab. Neu `torch`, `dgl` va smoke test van pass thi co the bo qua.
-
-### 8.6. Warning dependency conflict cua Colab
-
-Colab co rat nhieu package he thong khong lien quan den train model.
-
-Muc tieu khong phai lam toan bo Colab "sach", ma la dam bao cac package can cho train dung version:
+Neu cac package sau import duoc va smoke test pass, co the tiep tuc:
 
 - `torch`
 - `torchvision`
@@ -272,34 +396,31 @@ Muc tieu khong phai lam toan bo Colab "sach", ma la dam bao cac package can cho 
 - `pandas`
 - `scikit-learn`
 - `networkx`
-- `torchdata`
+- `scipy`
 
-Neu cac package nay import duoc va smoke test pass, co the tiep tuc train.
+## 11. Thu tu chay khuyen nghi
 
-## 9. Thu tu chay khuyen nghi
-
-Thu tu dung nhat:
+Thu tu an toan nhat:
 
 1. Bat GPU runtime
-2. Clone repo
-3. Cai PyTorch
-4. Restart
-5. Cai `numpy/pandas/sklearn/networkx/torchdata`
-6. Cai DGL
-7. Restart
-8. Kiem tra version
-9. Smoke test
-10. Train dai
+2. Clone `Colab_V4`
+3. Cai moi truong
+4. Restart runtime
+5. Kiem tra version
+6. Mount Drive
+7. Tao `RUN_DIR`
+8. Smoke test
+9. Train dai
 
-## 10. Ghi chu quan trong
+## 12. Ghi chu quan trong
 
-- Luon `git pull origin main` truoc khi train neu repo da duoc fix them.
-- Start voi `C-dataset` truoc.
-- `F-dataset` nang hon nhieu, nen uu tien Colab High-RAM.
-- Sau moi lan doi `torch`, `numpy`, `dgl`, phai restart runtime.
+- Luon dung `C-dataset`, khong dung `c-dataset`.
+- Neu repo da co san, uu tien `git fetch origin` + `git reset --hard origin/main`.
+- Sau moi lan doi `torch`, `dgl`, `numpy`, nen restart runtime.
+- `scripts/colab_setup.sh` la cach nhanh nhat; cai thu cong la fallback khi runtime Colab bi ban.
 - Neu smoke test fail, khong nen chay 1000 epoch ngay.
 
-## 11. Nguon install chinh thuc
+## 13. Nguon install chinh thuc
 
 - PyTorch previous versions: `https://pytorch.org/get-started/previous-versions/`
 - DGL wheel index for torch 2.4 / cu121: `https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html`

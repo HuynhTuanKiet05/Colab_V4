@@ -250,6 +250,7 @@ if __name__ == "__main__":
     parser.add_argument("--patience", default=180, type=int, help="early stopping patience in epochs without AUC improvement; <=0 disables early stopping")
     parser.add_argument("--lambda_cl", default=0.1, type=float, help="weight for contrastive alignment loss")
     parser.add_argument("--temperature", default=0.5, type=float, help="temperature for contrastive loss")
+    parser.add_argument("--cl_warmup_epochs", default=50, type=int, help="epochs to linearly ramp contrastive loss weight")
     parser.add_argument("--disable_scheduler", action="store_true", help="disable ReduceLROnPlateau scheduler")
     parser.add_argument("--topo_hidden", default=None, type=int, help="hidden dimension for topology encoder")
     parser.add_argument("--similarity_view_mode", choices=["consensus", "multi"], default=None, help="use only consensus similarity graph or fuse multiple similarity views")
@@ -260,7 +261,7 @@ if __name__ == "__main__":
     parser.add_argument("--pair_mode", choices=["mul_mlp", "interaction"], default="mul_mlp", help="pair scoring head")
     parser.add_argument("--gate_mode", choices=["scalar", "vector"], default="vector", help="fuzzy gate output type")
     parser.add_argument("--gate_bias_init", default=-2.0, type=float, help="initial bias for fuzzy gate")
-    parser.add_argument("--grad_clip", default=0.0, type=float, help="max gradient norm; <=0 disables clipping")
+    parser.add_argument("--grad_clip", default=1.0, type=float, help="max gradient norm; <=0 disables clipping")
     parser.add_argument("--use_relation_attention", action=argparse.BooleanOptionalAction, default=True, help="enable relation-aware attention in RLGHGT")
     parser.add_argument("--use_metapath", action=argparse.BooleanOptionalAction, default=True, help="enable metapath branch in RLGHGT")
     parser.add_argument("--use_global_hgt", action=argparse.BooleanOptionalAction, default=True, help="enable global context branch in RLGHGT")
@@ -289,7 +290,7 @@ if __name__ == "__main__":
     parser.add_argument("--ranking_margin", default=0.20, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--ranking_samples", default=2048, type=int, help=argparse.SUPPRESS)
     parser.add_argument("--hard_negative_weight", default=1.2, type=float, help=argparse.SUPPRESS)
-    parser.add_argument("--label_smoothing", default=0.01, type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--label_smoothing", default=0.05, type=float, help="label smoothing for CrossEntropyLoss")
     parser.add_argument("--target_auc", default=0.96, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--target_auc_warmup", default=400, type=int, help=argparse.SUPPRESS)
     parser.add_argument("--target_auc_patience", default=4, type=int, help=argparse.SUPPRESS)
@@ -386,8 +387,8 @@ if __name__ == "__main__":
         scheduler = None if args.disable_scheduler else ReduceLROnPlateau(
             optimizer,
             mode="max",
-            factor=0.5,
-            patience=30,
+            factor=0.3,
+            patience=20,
             min_lr=1e-6,
         )
         x_train = torch.tensor(data["X_train"][fold_idx], dtype=torch.long, device=device)
@@ -404,7 +405,7 @@ if __name__ == "__main__":
             f"raw_positive_weight={pos_weight:.4f}, label_smoothing={float(args.label_smoothing):.4f}"
         )
 
-        drdipr_graph, _, _ = dgl_heterograph(data, data["X_train"][fold_idx], args)
+        drdipr_graph, _ = dgl_heterograph(data, data["X_train"][fold_idx], args)
         drdipr_graph = drdipr_graph.to(device)
 
         best_fold = {
@@ -436,7 +437,12 @@ if __name__ == "__main__":
             )
             contrastive_loss = aux_losses.get("contrastive", train_score.new_tensor(0.0))
             ce_loss = criterion(train_score, y_train)
-            train_loss = ce_loss + args.lambda_cl * contrastive_loss
+            # B1: Contrastive warm-up — ramp lambda_cl from 0 to full over cl_warmup_epochs
+            if args.cl_warmup_epochs > 0 and epoch < args.cl_warmup_epochs:
+                current_lambda_cl = args.lambda_cl * (epoch / args.cl_warmup_epochs)
+            else:
+                current_lambda_cl = args.lambda_cl
+            train_loss = ce_loss + current_lambda_cl * contrastive_loss
 
             optimizer.zero_grad()
             train_loss.backward()
