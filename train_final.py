@@ -4,8 +4,19 @@ import logging
 import os
 import random
 import timeit
+import warnings
 from contextlib import nullcontext
 from pathlib import Path
+
+# DGL 2.4 still calls the deprecated ``torch.cuda.amp.autocast`` API in its
+# sparse backend; with --amp enabled this prints two FutureWarnings on every
+# forward pass, flooding the training log. Silence only those so that real
+# warnings from other sources stay visible.
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message=r".*torch\.cuda\.amp\.autocast.*",
+)
 
 import numpy as np
 import pandas as pd
