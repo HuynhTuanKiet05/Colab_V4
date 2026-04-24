@@ -347,7 +347,17 @@ if __name__ == "__main__":
     parser.add_argument("--plateau_factor", default=0.5, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--ema_decay", default=0.995, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--ema_warmup_epochs", default=80, type=int, help="epochs of plain training before EMA starts tracking; avoids random-init bias leaking into eval weights")
-    parser.add_argument("--amp", choices=["none", "auto", "bfloat16", "float16"], default="auto", help="automatic mixed precision dtype for forward/backward; 'auto' = bf16 on Ampere+, fp16 on Turing/T4; 'none' disables AMP")
+    parser.add_argument(
+        "--amp",
+        choices=["none", "auto", "bfloat16", "float16"],
+        default="none",
+        help=(
+            "automatic mixed precision dtype for forward/backward. Default 'none' keeps "
+            "fp32 since this model loses ~0.02-0.03 AUC under fp16. Use 'bfloat16' on "
+            "Ampere+ (L4/A100) for ~1.4-1.8x speedup with minimal AUC drop, 'float16' for "
+            "max speed on T4/V100 at the cost of ~0.02-0.03 AUC, or 'auto' to pick per GPU."
+        ),
+    )
 
     import sys as _sys
     _explicit = set()
@@ -425,12 +435,9 @@ if __name__ == "__main__":
     amp_dtype = resolve_amp_dtype(args.amp, device)
     if amp_dtype is None:
         logging.info("AMP: disabled (fp32)")
-        scaler = None
     else:
         gpu_name = torch.cuda.get_device_name(device) if device.type == "cuda" else device.type
         logging.info(f"AMP: enabled (dtype={str(amp_dtype).rsplit('.', 1)[-1]}, device={gpu_name})")
-        # Only fp16 needs loss scaling (bf16 shares fp32 exponent range).
-        scaler = torch.amp.GradScaler(device.type) if amp_dtype == torch.float16 else None
 
     def autocast_ctx():
         return torch.autocast(device_type=device.type, dtype=amp_dtype) if amp_dtype is not None else nullcontext()
@@ -548,6 +555,13 @@ if __name__ == "__main__":
         # drag eval AUC below random. See training log "EMA: ..." line.
         ema = None
         neg_rng = np.random.default_rng(args.random_seed + fold_idx * 9973)
+
+        # Per-fold GradScaler. A single shared scaler across folds carries scale
+        # state and a step counter tied to the *previous* fold's optimizer; when
+        # Fold 1 attaches a fresh optimizer, scaler.step() can silently skip every
+        # update, collapsing predictions to a single class (observed as AUC~0.38,
+        # accuracy~0.5, precision/recall=0).
+        scaler = torch.amp.GradScaler(device.type) if amp_dtype == torch.float16 else None
 
         best_fold = {
             "AUC": -1.0,
