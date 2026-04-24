@@ -314,6 +314,7 @@ if __name__ == "__main__":
     parser.add_argument("--plateau_patience", default=30, type=int, help=argparse.SUPPRESS)
     parser.add_argument("--plateau_factor", default=0.5, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--ema_decay", default=0.995, type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--ema_warmup_epochs", default=80, type=int, help="epochs of plain training before EMA starts tracking; avoids random-init bias leaking into eval weights")
 
     import sys as _sys
     _explicit = set()
@@ -375,7 +376,8 @@ if __name__ == "__main__":
         f"plateau_factor={args.plateau_factor} | min_lr={args.min_lr} | grad_clip={args.grad_clip}"
     )
     logging.info(
-        f"EMA: enabled={args.use_ema} (decay={args.ema_decay}) | "
+        f"EMA: enabled={args.use_ema} (decay={args.ema_decay}, "
+        f"warmup_epochs={args.ema_warmup_epochs}) | "
         f"neg_resample_every={args.neg_resample_every} | "
         f"filter_assoc_positives_only={args.filter_assoc_positives_only}"
     )
@@ -493,7 +495,12 @@ if __name__ == "__main__":
             f"edges_drug_disease={int(pos_pairs_fold.shape[0])} (positives_only={args.filter_assoc_positives_only})"
         )
 
-        ema = ModelEMA(model, decay=args.ema_decay) if args.use_ema else None
+        # EMA is lazily instantiated at --ema_warmup_epochs so that the shadow
+        # weights are seeded from already-trained parameters (not random init).
+        # With full-batch training (1 update/epoch) and decay=0.995, eager
+        # init would leave EMA dominated by random weights for ~200 epochs and
+        # drag eval AUC below random. See training log "EMA: ..." line.
+        ema = None
         neg_rng = np.random.default_rng(args.random_seed + fold_idx * 9973)
 
         best_fold = {
@@ -585,6 +592,10 @@ if __name__ == "__main__":
             if args.grad_clip > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
+            # Lazy-init EMA once base model is past --ema_warmup_epochs so the
+            # shadow snapshot is seeded from trained weights (not random init).
+            if args.use_ema and ema is None and (epoch + 1) >= args.ema_warmup_epochs:
+                ema = ModelEMA(model, decay=args.ema_decay)
             if ema is not None:
                 ema.update(model)
 
