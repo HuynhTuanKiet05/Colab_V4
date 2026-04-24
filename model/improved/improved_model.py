@@ -135,26 +135,28 @@ class AMNTDDA(nn.Module):
         self.node_types = ["drug", "disease", "protein"]
 
         if self.assoc_backbone == "vanilla_hgt":
-            self.hgt_dgl = dgl.nn.pytorch.conv.HGTConv(
-                args.hgt_in_dim,
-                int(args.hgt_in_dim / args.hgt_head),
-                args.hgt_head,
-                3,
-                3,
-                args.dropout,
-            )
-            self.hgt_dgl_last = dgl.nn.pytorch.conv.HGTConv(
-                args.hgt_in_dim,
-                args.hgt_head_dim,
-                args.hgt_head,
-                3,
-                3,
-                args.dropout,
-            )
             self.hgt_layers = nn.ModuleList()
             for _ in range(args.hgt_layer - 1):
-                self.hgt_layers.append(self.hgt_dgl)
-            self.hgt_layers.append(self.hgt_dgl_last)
+                self.hgt_layers.append(
+                    dgl.nn.pytorch.conv.HGTConv(
+                        args.hgt_in_dim,
+                        int(args.hgt_in_dim / args.hgt_head),
+                        args.hgt_head,
+                        3,
+                        3,
+                        args.dropout,
+                    )
+                )
+            self.hgt_layers.append(
+                dgl.nn.pytorch.conv.HGTConv(
+                    args.hgt_in_dim,
+                    args.hgt_head_dim,
+                    args.hgt_head,
+                    3,
+                    3,
+                    args.dropout,
+                )
+            )
             assoc_dim = args.hgt_head_dim * args.hgt_head
             self.rlg_hgt = None
         elif self.assoc_backbone == "rlghgt":
@@ -185,7 +187,7 @@ class AMNTDDA(nn.Module):
 
         topo_feat_dim = getattr(args, "topo_feat_dim", 7)
         topo_hidden = getattr(args, "topo_hidden", 128)
-        temperature = getattr(args, "temperature", getattr(args, "contrastive_temperature", 0.5))
+        temperature = getattr(args, "contrastive_temperature", getattr(args, "temperature", 0.5))
 
         self.drug_topology_encoder = TopologyEncoder(
             topo_feat_dim=topo_feat_dim,
@@ -222,8 +224,8 @@ class AMNTDDA(nn.Module):
         elif self.fusion_mode == "rvg":
             self.drug_multi_view = None
             self.disease_multi_view = None
-            drug_encoder_layer = nn.TransformerEncoderLayer(d_model=args.gt_out_dim, nhead=args.tr_head)
-            disease_encoder_layer = nn.TransformerEncoderLayer(d_model=args.gt_out_dim, nhead=args.tr_head)
+            drug_encoder_layer = nn.TransformerEncoderLayer(d_model=args.gt_out_dim, nhead=args.tr_head, batch_first=True)
+            disease_encoder_layer = nn.TransformerEncoderLayer(d_model=args.gt_out_dim, nhead=args.tr_head, batch_first=True)
             self.drug_trans = nn.TransformerEncoder(drug_encoder_layer, num_layers=args.tr_layer)
             self.disease_trans = nn.TransformerEncoder(disease_encoder_layer, num_layers=args.tr_layer)
             self.drug_fuzzy_gate = FuzzyGate(
@@ -263,18 +265,20 @@ class AMNTDDA(nn.Module):
         }
 
     def _compute_vanilla_assoc_views(self, drdipr_graph, feature_dict):
+        drug_type_id = drdipr_graph.get_ntype_id("drug")
+        disease_type_id = drdipr_graph.get_ntype_id("disease")
         with drdipr_graph.local_scope():
             drdipr_graph.ndata["h"] = feature_dict
             homo_graph = dgl.to_homogeneous(drdipr_graph, ndata="h")
-            feature = torch.cat((feature_dict["drug"], feature_dict["disease"], feature_dict["protein"]), dim=0)
+            feature = homo_graph.ndata["h"]
+            ntype = homo_graph.ndata["_TYPE"]
+            etype = homo_graph.edata["_TYPE"]
             for layer in self.hgt_layers:
-                feature = layer(homo_graph, feature, homo_graph.ndata["_TYPE"], homo_graph.edata["_TYPE"], presorted=True)
+                feature = layer(homo_graph, feature, ntype, etype, presorted=True)
 
-        drug_count = self.args.drug_number
-        disease_count = self.args.disease_number
-        drug_assoc = feature[:drug_count, :]
-        disease_assoc = feature[drug_count:drug_count + disease_count, :]
-        return drug_assoc, disease_assoc
+        drug_mask = ntype == drug_type_id
+        disease_mask = ntype == disease_type_id
+        return feature[drug_mask], feature[disease_mask]
 
     def _compute_rlghgt_assoc_views(self, drdipr_graph, feature_dict):
         assoc_out = self.rlg_hgt(drdipr_graph, feature_dict)
@@ -386,27 +390,31 @@ class AMNTDDA(nn.Module):
         contrastive_disease = self.contrastive_loss(disease_sim, disease_assoc, disease_topo)
         contrastive = 0.5 * (contrastive_drug + contrastive_disease)
 
-        diagnostics = {
-            "assoc_backbone": self.assoc_backbone,
-            "fusion_mode": self.fusion_mode,
-            "pair_mode": self.pair_mode,
-            "similarity_view_mode": self.similarity_view_mode,
-            "contrastive_alignment_drug": float(F.cosine_similarity(drug_sim, drug_topo, dim=-1).mean().item()),
-            "contrastive_alignment_disease": float(F.cosine_similarity(disease_sim, disease_topo, dim=-1).mean().item()),
-            "drug_sim_assoc_cos": float(F.cosine_similarity(drug_sim, drug_assoc, dim=-1).mean().item()),
-            "disease_sim_assoc_cos": float(F.cosine_similarity(disease_sim, disease_assoc, dim=-1).mean().item()),
-            "drug_assoc_norm": float(torch.norm(drug_assoc, dim=-1).mean().item()),
-            "disease_assoc_norm": float(torch.norm(disease_assoc, dim=-1).mean().item()),
-            "contrastive": float(contrastive.item()),
-        }
-        diagnostics.update(drug_view_diagnostics)
-        diagnostics.update(disease_view_diagnostics)
+        if return_diagnostics:
+            diagnostics = {
+                "assoc_backbone": self.assoc_backbone,
+                "fusion_mode": self.fusion_mode,
+                "pair_mode": self.pair_mode,
+                "similarity_view_mode": self.similarity_view_mode,
+                "contrastive_alignment_drug": float(F.cosine_similarity(drug_sim, drug_topo, dim=-1).mean().item()),
+                "contrastive_alignment_disease": float(F.cosine_similarity(disease_sim, disease_topo, dim=-1).mean().item()),
+                "drug_sim_assoc_cos": float(F.cosine_similarity(drug_sim, drug_assoc, dim=-1).mean().item()),
+                "disease_sim_assoc_cos": float(F.cosine_similarity(disease_sim, disease_assoc, dim=-1).mean().item()),
+                "drug_assoc_norm": float(torch.norm(drug_assoc, dim=-1).mean().item()),
+                "disease_assoc_norm": float(torch.norm(disease_assoc, dim=-1).mean().item()),
+                "contrastive": float(contrastive.item()),
+            }
+            diagnostics.update(drug_view_diagnostics)
+            diagnostics.update(disease_view_diagnostics)
+        else:
+            diagnostics = None
 
         if self.fusion_mode == "mva":
             drug_repr = self.drug_multi_view(drug_sim, drug_assoc, drug_topo)
             disease_repr = self.disease_multi_view(disease_sim, disease_assoc, disease_topo)
-            diagnostics.update(self._zero_gate_branch("drug"))
-            diagnostics.update(self._zero_gate_branch("disease"))
+            if return_diagnostics:
+                diagnostics.update(self._zero_gate_branch("drug"))
+                diagnostics.update(self._zero_gate_branch("disease"))
         else:
             drug_base = torch.stack((drug_sim, drug_assoc), dim=1)
             disease_base = torch.stack((disease_sim, disease_assoc), dim=1)
@@ -420,8 +428,6 @@ class AMNTDDA(nn.Module):
             else:
                 drug_repr = self.drug_fuzzy_gate(drug_base, drug_topo)
                 disease_repr = self.disease_fuzzy_gate(disease_base, disease_topo)
-                diagnostics.update(self._zero_gate_branch("drug"))
-                diagnostics.update(self._zero_gate_branch("disease"))
 
         pair_drug = drug_repr[sample[:, 0].long()]
         pair_disease = disease_repr[sample[:, 1].long()]

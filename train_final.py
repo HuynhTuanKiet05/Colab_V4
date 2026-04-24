@@ -12,18 +12,28 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as fn
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 from data_preprocess_improved import (
     dgl_heterograph,
     dgl_similarity_graph,
     dgl_similarity_view_graphs,
     data_processing,
+    filter_positive_pairs,
     get_data,
     k_fold,
+    resample_fold_negatives,
 )
 from metric import get_metric
 from model.improved.improved_model import AMNTDDA
+from model.improved.training_utils import (
+    FocalLoss,
+    ModelEMA,
+    apply_warmup_lr,
+    compute_focal_gamma,
+    get_adamw_param_groups,
+    ranking_loss,
+)
 from topology_features import extract_topology_features
 
 
@@ -260,7 +270,15 @@ if __name__ == "__main__":
     parser.add_argument("--pair_mode", choices=["mul_mlp", "interaction"], default="mul_mlp", help="pair scoring head")
     parser.add_argument("--gate_mode", choices=["scalar", "vector"], default="vector", help="fuzzy gate output type")
     parser.add_argument("--gate_bias_init", default=-2.0, type=float, help="initial bias for fuzzy gate")
-    parser.add_argument("--grad_clip", default=0.0, type=float, help="max gradient norm; <=0 disables clipping")
+    parser.add_argument("--grad_clip", default=1.0, type=float, help="max gradient norm; <=0 disables clipping")
+    parser.add_argument("--optimizer", choices=["adam", "adamw"], default="adamw", help="optimizer (adamw uses decoupled weight decay)")
+    parser.add_argument("--scheduler", choices=["plateau", "cosine"], default="plateau", help="LR scheduler after warmup")
+    parser.add_argument("--use_ema", action=argparse.BooleanOptionalAction, default=True, help="maintain EMA of weights for evaluation")
+    parser.add_argument("--use_focal", action=argparse.BooleanOptionalAction, default=True, help="use focal loss instead of plain CE")
+    parser.add_argument("--use_ranking", action=argparse.BooleanOptionalAction, default=True, help="add BPR-style pairwise ranking loss")
+    parser.add_argument("--hard_neg_ratio", default=0.3, type=float, help="fraction of ranking negatives drawn as hard negatives")
+    parser.add_argument("--neg_resample_every", default=0, type=int, help="resample training negatives every N epochs (0 disables dynamic negatives)")
+    parser.add_argument("--filter_assoc_positives_only", action=argparse.BooleanOptionalAction, default=True, help="build drdipr heterograph using training positives only (fixes BUG-09)")
     parser.add_argument("--use_relation_attention", action=argparse.BooleanOptionalAction, default=True, help="enable relation-aware attention in RLGHGT")
     parser.add_argument("--use_metapath", action=argparse.BooleanOptionalAction, default=True, help="enable metapath branch in RLGHGT")
     parser.add_argument("--use_global_hgt", action=argparse.BooleanOptionalAction, default=True, help="enable global context branch in RLGHGT")
@@ -289,18 +307,37 @@ if __name__ == "__main__":
     parser.add_argument("--ranking_margin", default=0.20, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--ranking_samples", default=2048, type=int, help=argparse.SUPPRESS)
     parser.add_argument("--hard_negative_weight", default=1.2, type=float, help=argparse.SUPPRESS)
-    parser.add_argument("--label_smoothing", default=0.01, type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--label_smoothing", default=0.0, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--target_auc", default=0.96, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--target_auc_warmup", default=400, type=int, help=argparse.SUPPRESS)
     parser.add_argument("--target_auc_patience", default=4, type=int, help=argparse.SUPPRESS)
-    parser.add_argument("--plateau_patience", default=3, type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--plateau_patience", default=30, type=int, help=argparse.SUPPRESS)
     parser.add_argument("--plateau_factor", default=0.5, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--ema_decay", default=0.995, type=float, help=argparse.SUPPRESS)
+
+    import sys as _sys
+    _explicit = set()
+    for _arg in _sys.argv[1:]:
+        if _arg.startswith("--"):
+            _key = _arg.split("=", 1)[0].lstrip("-").replace("-", "_")
+            _explicit.add(_key)
 
     args = parser.parse_args()
     apply_dataset_preset(args)
     if args.fusion_mode == "mva_fuzzy":
         args.fusion_mode = "rvg"
+
+    # Consolidate deprecated contrastive params. Canonical flags are
+    # --contrastive_weight / --contrastive_temperature; legacy --lambda_cl /
+    # --temperature override them only when the user passes them explicitly.
+    if "lambda_cl" in _explicit:
+        args.contrastive_weight = float(args.lambda_cl)
+    else:
+        args.lambda_cl = float(args.contrastive_weight)
+    if "temperature" in _explicit:
+        args.contrastive_temperature = float(args.temperature)
+    else:
+        args.temperature = float(args.contrastive_temperature)
 
     device = resolve_device(args.device)
     args.device = device
@@ -325,7 +362,23 @@ if __name__ == "__main__":
         logging.info(f"Early stopping patience: {args.patience}")
     else:
         logging.info("Early stopping: disabled")
-    logging.info(f"Contrastive weight lambda_cl: {args.lambda_cl}")
+    logging.info(
+        f"Contrastive: weight={args.contrastive_weight:.4g} | temperature={args.contrastive_temperature:.4g}"
+    )
+    logging.info(
+        f"Loss mix: focal={args.use_focal} (gamma warm->{args.focal_gamma_warm}->{args.focal_gamma}) | "
+        f"ranking={args.use_ranking} (w={args.ranking_weight}, margin={args.ranking_margin}, hard_ratio={args.hard_neg_ratio})"
+    )
+    logging.info(
+        f"Optimizer: {args.optimizer} | scheduler: {args.scheduler} | "
+        f"warmup_epochs={args.lr_warmup_epochs} | plateau_patience={args.plateau_patience} | "
+        f"plateau_factor={args.plateau_factor} | min_lr={args.min_lr} | grad_clip={args.grad_clip}"
+    )
+    logging.info(
+        f"EMA: enabled={args.use_ema} (decay={args.ema_decay}) | "
+        f"neg_resample_every={args.neg_resample_every} | "
+        f"filter_assoc_positives_only={args.filter_assoc_positives_only}"
+    )
     logging.info(f"Similarity view mode: {args.similarity_view_mode} | Positive weight mode: {args.positive_weight_mode}")
     logging.info(
         "Model config: "
@@ -382,30 +435,66 @@ if __name__ == "__main__":
         logging.info(metric_header)
 
         model = AMNTDDA(args).to(device)
-        optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
-        scheduler = None if args.disable_scheduler else ReduceLROnPlateau(
-            optimizer,
-            mode="max",
-            factor=0.5,
-            patience=30,
-            min_lr=1e-6,
-        )
-        x_train = torch.tensor(data["X_train"][fold_idx], dtype=torch.long, device=device)
-        y_train = torch.tensor(data["Y_train"][fold_idx], dtype=torch.long, device=device).flatten()
+        if args.optimizer == "adamw":
+            param_groups = get_adamw_param_groups(model, args.weight_decay)
+            optimizer = optim.AdamW(param_groups, lr=args.lr)
+        else:
+            optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
+        base_lrs = [pg["lr"] for pg in optimizer.param_groups]
+
+        if args.disable_scheduler:
+            scheduler = None
+        elif args.scheduler == "cosine":
+            remaining = max(1, args.epochs - args.lr_warmup_epochs)
+            scheduler = CosineAnnealingLR(optimizer, T_max=remaining, eta_min=args.min_lr)
+        else:
+            scheduler = ReduceLROnPlateau(
+                optimizer,
+                mode="max",
+                factor=args.plateau_factor,
+                patience=args.plateau_patience,
+                min_lr=args.min_lr,
+            )
+
+        x_train_np = np.asarray(data["X_train"][fold_idx])
+        y_train_np = np.asarray(data["Y_train"][fold_idx]).reshape(-1).astype(int)
+        x_train = torch.tensor(x_train_np, dtype=torch.long, device=device)
+        y_train = torch.tensor(y_train_np, dtype=torch.long, device=device).flatten()
         x_test = torch.tensor(data["X_test"][fold_idx], dtype=torch.long, device=device)
         y_test = data["Y_test"][fold_idx].flatten()
         class_weights, pos_weight = build_class_weights(args, data, y_train, device)
-        criterion = nn.CrossEntropyLoss(
-            weight=class_weights,
-            label_smoothing=max(0.0, float(args.label_smoothing)),
-        )
+        if args.use_focal:
+            criterion = FocalLoss(
+                gamma=args.focal_gamma_warm,
+                weight=class_weights,
+                label_smoothing=max(0.0, float(args.label_smoothing)),
+            )
+        else:
+            criterion = nn.CrossEntropyLoss(
+                weight=class_weights,
+                label_smoothing=max(0.0, float(args.label_smoothing)),
+            )
         logging.info(
             f"Fold {fold_idx} loss config: pos_weight_mode={args.positive_weight_mode}, "
             f"raw_positive_weight={pos_weight:.4f}, label_smoothing={float(args.label_smoothing):.4f}"
         )
 
-        drdipr_graph, _, _ = dgl_heterograph(data, data["X_train"][fold_idx], args)
+        # BUG-09 fix: only use TRAIN POSITIVES as ('drug','association','disease')
+        # edges of the HGT heterograph. Negatives were previously being injected
+        # as real associations and polluting the association representation.
+        if args.filter_assoc_positives_only:
+            pos_pairs_fold = filter_positive_pairs(x_train_np, y_train_np)
+        else:
+            pos_pairs_fold = x_train_np
+        drdipr_graph, _, _ = dgl_heterograph(data, pos_pairs_fold, args)
         drdipr_graph = drdipr_graph.to(device)
+        logging.info(
+            f"Fold {fold_idx} drdipr_graph: n_train_pairs={len(x_train_np)} | "
+            f"edges_drug_disease={int(pos_pairs_fold.shape[0])} (positives_only={args.filter_assoc_positives_only})"
+        )
+
+        ema = ModelEMA(model, decay=args.ema_decay) if args.use_ema else None
+        neg_rng = np.random.default_rng(args.random_seed + fold_idx * 9973)
 
         best_fold = {
             "AUC": -1.0,
@@ -421,6 +510,42 @@ if __name__ == "__main__":
         start = timeit.default_timer()
 
         for epoch in range(args.epochs):
+            apply_warmup_lr(optimizer, base_lrs, epoch, args.lr_warmup_epochs)
+
+            if (
+                args.neg_resample_every > 0
+                and epoch > 0
+                and epoch % args.neg_resample_every == 0
+            ):
+                new_x, new_y = resample_fold_negatives(data, fold_idx, neg_rng)
+                if new_x is not None:
+                    x_train_np = new_x
+                    y_train_np = new_y.reshape(-1).astype(int)
+                    x_train = torch.tensor(x_train_np, dtype=torch.long, device=device)
+                    y_train = torch.tensor(y_train_np, dtype=torch.long, device=device).flatten()
+                    class_weights, pos_weight = build_class_weights(args, data, y_train, device)
+                    if isinstance(criterion, FocalLoss):
+                        criterion = FocalLoss(
+                            gamma=criterion.gamma,
+                            weight=class_weights,
+                            label_smoothing=max(0.0, float(args.label_smoothing)),
+                        )
+                    else:
+                        criterion = nn.CrossEntropyLoss(
+                            weight=class_weights,
+                            label_smoothing=max(0.0, float(args.label_smoothing)),
+                        )
+
+            if args.use_focal and isinstance(criterion, FocalLoss):
+                criterion.set_gamma(
+                    compute_focal_gamma(
+                        epoch,
+                        max(1, args.warmup_epochs),
+                        args.focal_gamma_warm,
+                        args.focal_gamma,
+                    )
+                )
+
             model.train()
             _, train_score, aux_losses = model(
                 drdr_graph,
@@ -436,16 +561,37 @@ if __name__ == "__main__":
             )
             contrastive_loss = aux_losses.get("contrastive", train_score.new_tensor(0.0))
             ce_loss = criterion(train_score, y_train)
-            train_loss = ce_loss + args.lambda_cl * contrastive_loss
+
+            if args.use_ranking and args.ranking_weight > 0:
+                ranking_term = ranking_loss(
+                    train_score,
+                    y_train,
+                    margin=args.ranking_margin,
+                    num_samples=args.ranking_samples,
+                    hard_weight=args.hard_negative_weight,
+                    hard_ratio=args.hard_neg_ratio,
+                )
+            else:
+                ranking_term = train_score.new_tensor(0.0)
+
+            train_loss = (
+                ce_loss
+                + args.contrastive_weight * contrastive_loss
+                + args.ranking_weight * ranking_term
+            )
 
             optimizer.zero_grad()
             train_loss.backward()
             if args.grad_clip > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
+            if ema is not None:
+                ema.update(model)
 
             should_eval = (epoch + 1) >= args.eval_start_epoch and ((epoch + 1 - args.eval_start_epoch) % max(1, args.score_every) == 0)
             if should_eval or epoch == args.epochs - 1:
+                if ema is not None:
+                    ema.apply_to(model)
                 model.eval()
                 with torch.no_grad():
                     _, test_score, diagnostics = model(
@@ -460,12 +606,17 @@ if __name__ == "__main__":
                         disease_topo_feat=disease_topo_feat,
                         return_diagnostics=True,
                     )
+                if ema is not None:
+                    ema.restore(model)
 
                 test_prob = fn.softmax(test_score, dim=-1)[:, 1].cpu().numpy()
                 test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
                 auc, aupr, accuracy, precision, recall, f1, mcc = get_metric(y_test, test_pred, test_prob)
-                if scheduler is not None:
-                    scheduler.step(auc)
+                if scheduler is not None and epoch >= args.lr_warmup_epochs:
+                    if isinstance(scheduler, ReduceLROnPlateau):
+                        scheduler.step(auc)
+                    else:
+                        scheduler.step()
 
                 elapsed = timeit.default_timer() - start
                 logging.info(
@@ -525,13 +676,18 @@ if __name__ == "__main__":
                         f"{no_improve_epochs} epochs without AUC improvement."
                     )
                     break
-            elif (epoch + 1) % max(1, args.log_every) == 0:
-                elapsed = timeit.default_timer() - start
-                current_lr = optimizer.param_groups[0]["lr"]
-                logging.info(
-                    f"Epoch {epoch + 1:4d} | {elapsed:7.2f}s | "
-                    f"lr {current_lr:.1e} | loss {train_loss.item():.5f} | cls {ce_loss.item():.5f} | ctr {contrastive_loss.item():.5f}"
-                )
+            else:
+                if scheduler is not None and not isinstance(scheduler, ReduceLROnPlateau) and epoch >= args.lr_warmup_epochs:
+                    scheduler.step()
+                if (epoch + 1) % max(1, args.log_every) == 0:
+                    elapsed = timeit.default_timer() - start
+                    current_lr = optimizer.param_groups[0]["lr"]
+                    logging.info(
+                        f"Epoch {epoch + 1:4d} | {elapsed:7.2f}s | "
+                        f"lr {current_lr:.1e} | loss {train_loss.item():.5f} | "
+                        f"cls {ce_loss.item():.5f} | ctr {contrastive_loss.item():.5f} | "
+                        f"rnk {float(ranking_term.item()):.5f}"
+                    )
 
         aucs.append(best_fold["AUC"])
         auprs.append(best_fold["AUPR"])
@@ -544,6 +700,8 @@ if __name__ == "__main__":
         logging.info(f"Fold {fold_idx} completed: best_epoch={best_fold['epoch']}, best_auc={best_fold['AUC']:.5f}, best_aupr={best_fold['AUPR']:.5f}")
 
         del model, optimizer, scheduler, drdipr_graph
+        if ema is not None:
+            del ema
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
