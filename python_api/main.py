@@ -34,6 +34,14 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI(title='HGT Drug-Disease Prediction API', version='2.0.0')
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+@app.exception_handler(Exception)
+async def _global_exc_handler(request: Request, exc: Exception):
+    tb = _traceback.format_exc()
+    print(f"[ERROR] Unhandled on {request.url.path}:\n{tb}")
+    return JSONResponse(status_code=500, content={"detail": str(exc), "traceback": tb})
+
+
 device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
 print(f"Using device: {device}")
 
