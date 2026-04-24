@@ -17,7 +17,7 @@ $recent = db()->query('SELECT * FROM prediction_requests ORDER BY created_at DES
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin - Hệ thống quản trị</title>
+    <title>Admin Panel</title>
     <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
@@ -25,46 +25,51 @@ $recent = db()->query('SELECT * FROM prediction_requests ORDER BY created_at DES
     <div class="navbar">
         <div>
             <div class="brand">Admin Panel</div>
-            <div class="muted">Quản lý dữ liệu và theo dõi hoạt động hệ thống</div>
+            <div class="muted">Quan ly du lieu va theo doi hoat dong he thong bang mot giao dien thong nhat.</div>
         </div>
         <div class="nav-links">
-            <a class="btn" style="background: rgba(255,255,255,0.06); box-shadow:none;" href="index.php">Dashboard</a>
-            <a class="btn" style="background: rgba(255,255,255,0.06); box-shadow:none;" href="admin_drugs.php">Thuốc</a>
-            <a class="btn" style="background: rgba(255,255,255,0.06); box-shadow:none;" href="admin_diseases.php">Bệnh</a>
-            <a class="btn" style="background: rgba(255,255,255,0.06); box-shadow:none;" href="admin_links.php">Liên kết</a>
-            <a class="btn" style="background: rgba(244, 63, 94, 0.16); box-shadow:none;" href="logout.php">Đăng xuất</a>
+            <a class="btn btn-ghost" href="index.php">Dashboard</a>
+            <a class="btn btn-ghost" href="admin_drugs.php">Thuoc</a>
+            <a class="btn btn-ghost" href="admin_diseases.php">Benh</a>
+            <a class="btn btn-ghost" href="admin_links.php">Lien ket</a>
+            <a class="btn btn-danger" href="logout.php">Dang xuat</a>
         </div>
     </div>
 
     <div class="admin-stats">
-        <div class="glass-card stat-card"><div class="label">Tổng số thuốc</div><h2><?= number_format($stats['drugs']) ?></h2></div>
-        <div class="glass-card stat-card"><div class="label">Tổng số bệnh</div><h2><?= number_format($stats['diseases']) ?></h2></div>
-        <div class="glass-card stat-card"><div class="label">Tổng số protein</div><h2><?= number_format($stats['proteins']) ?></h2></div>
-        <div class="glass-card stat-card"><div class="label">Tổng lượt dự đoán</div><h2><?= number_format($stats['predictions']) ?></h2></div>
+        <div class="glass-card stat-card"><div class="label">Tong so thuoc</div><h2><?= number_format($stats['drugs']) ?></h2></div>
+        <div class="glass-card stat-card"><div class="label">Tong so benh</div><h2><?= number_format($stats['diseases']) ?></h2></div>
+        <div class="glass-card stat-card"><div class="label">Tong so protein</div><h2><?= number_format($stats['proteins']) ?></h2></div>
+        <div class="glass-card stat-card"><div class="label">Tong luot du doan</div><h2><?= number_format($stats['predictions']) ?></h2></div>
     </div>
 
     <div class="grid grid-2">
         <div class="glass-card">
-            <h3>Lượt dự đoán gần đây</h3>
+            <div class="section-header">
+                <div>
+                    <h3>Luot du doan gan day</h3>
+                    <p class="muted">Theo doi cac truy van moi nhat de kiem tra tinh on dinh cua he thong.</p>
+                </div>
+            </div>
             <div class="table-container">
                 <table class="table">
                     <thead>
                     <tr>
                         <th>ID</th>
-                        <th>Kiểu</th>
+                        <th>Kieu</th>
                         <th>Input</th>
-                        <th>Kết quả</th>
-                        <th>Thời gian</th>
+                        <th>Ket qua</th>
+                        <th>Thoi gian</th>
                     </tr>
                     </thead>
                     <tbody>
                     <?php foreach ($recent as $row): ?>
                         <tr>
                             <td class="muted">#<?= $row['id'] ?></td>
-                            <td><span class="badge" style="background: rgba(255,255,255,0.05);"><?= e((string) $row['query_type']) ?></span></td>
-                            <td style="font-weight: 600;"><?= e((string) $row['input_text']) ?></td>
+                            <td><span class="badge badge-neutral"><?= e((string) $row['query_type']) ?></span></td>
+                            <td><strong><?= e((string) $row['input_text']) ?></strong></td>
                             <td><span class="badge badge-drug">Top-<?= $row['top_k'] ?></span></td>
-                            <td class="muted"><?= date('H:i d/m', strtotime((string)$row['created_at'])) ?></td>
+                            <td class="muted"><?= date('H:i d/m', strtotime((string) $row['created_at'])) ?></td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
@@ -73,15 +78,21 @@ $recent = db()->query('SELECT * FROM prediction_requests ORDER BY created_at DES
         </div>
 
         <div class="glass-card">
-            <h3>Hệ thống dữ liệu</h3>
-            <p class="muted" style="margin-bottom: 20px;">Quản lý các thực thể và liên kết sinh học trong CSDL.</p>
-            <div style="padding: 20px; background: rgba(59, 130, 246, 0.1); border-radius: 18px; border: 1px solid rgba(59,130,246,0.2);">
-                <div class="label" style="color: #93c5fd;">Tổng liên kết hiện tại</div>
-                <div style="font-size: 2rem; font-weight: 800; color: #fff;"> <?= number_format($stats['links']) ?></div>
-                <p class="muted" style="font-size: 12px; margin-top: 8px;">Dữ liệu này được sử dụng để xây dựng đồ thị cho mô hình HGT.</p>
+            <div class="section-header">
+                <div>
+                    <h3>He thong du lieu</h3>
+                    <p class="muted">Thong ke tong quan giup theo doi quy mo du lieu su dung cho mo hinh.</p>
+                </div>
             </div>
-            <div style="margin-top: 22px; display: grid; gap: 12px;">
-                <a href="admin_links.php" class="btn" style="width: 100%;">Quản lý liên kết ngay</a>
+
+            <div class="surface-box">
+                <div class="label">Tong lien ket hien tai</div>
+                <div class="stat-card"><h2><?= number_format($stats['links']) ?></h2></div>
+                <p class="muted">Du lieu lien ket nay duoc dung de xay dung do thi va luu cac quan he phuc vu huan luyen mo hinh HGT.</p>
+            </div>
+
+            <div class="grid section-spaced">
+                <a href="admin_links.php" class="btn btn-full">Quan ly lien ket ngay</a>
             </div>
         </div>
     </div>

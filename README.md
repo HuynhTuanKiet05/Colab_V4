@@ -1,5 +1,20 @@
 # Colab_V2 - Drug Disease AI Predictor
 
+## Current Repository Layout
+
+- `app/`: PHP application services and configuration.
+- `public/`: PHP web entry points and assets.
+- `python_api/`: FastAPI prediction service.
+- `model/`: model implementations used by the improved pipeline.
+- `AMDGT_original/`: original baseline code kept for comparison.
+- `scripts/`: setup, training, and metadata utilities.
+- `database/database_schema.sql`: MySQL schema.
+- `docs/`: guides, reports, and planning notes.
+- `samples/test.json`: sample payload/data file.
+- `logs/`: local runtime logs.
+
+Runtime Python files such as `train_final.py`, `data_preprocess_improved.py`, `topology_features.py`, and `metric.py` remain at the project root because existing imports and launcher scripts expect them there.
+
 Ứng dụng web PHP + MySQL tích hợp Python API để dự đoán liên kết giữa **thuốc** và **bệnh lý** bằng mô hình HGT cải tiến.
 
 ## Tổng quan
