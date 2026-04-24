@@ -1,7 +1,8 @@
 import dgl.nn.pytorch
 import torch
 import torch.nn as nn
-from model import gt_net_drug, gt_net_disease
+
+from . import gt_net_drug, gt_net_disease
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

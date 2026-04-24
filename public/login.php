@@ -14,7 +14,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('index.php');
     }
 
-    $error = 'Sai tên đăng nhập hoặc mật khẩu.';
+    $error = 'Sai ten dang nhap hoac mat khau.';
 }
 ?>
 <!DOCTYPE html>
@@ -22,33 +22,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Đăng nhập</title>
+    <title>Dang nhap</title>
     <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
 <div class="login-wrap">
     <div class="login-box">
-        <div style="margin-bottom: 20px;">
-            <div class="brand" style="font-size: 28px; display: inline-block; margin-bottom: 10px;">AMNTDDA</div>
-            <h1>Đăng nhập hệ thống</h1>
-            <p class="muted">Nền tảng dự đoán liên kết thuốc - bệnh bằng AI HGT</p>
+        <div class="spacer-lg">
+            <div class="brand brand-inline">AMNTDDA</div>
+            <h1>Dang nhap he thong</h1>
+            <p class="muted">Nen tang du doan lien ket thuoc - benh bang AI HGT voi giao dien sang, thong nhat va de su dung.</p>
         </div>
+
         <?php if ($error): ?>
             <div class="alert alert-error"><?= e($error) ?></div>
         <?php endif; ?>
+
         <form method="post">
-            <div style="margin-bottom:14px;">
-                <label>Tên đăng nhập</label>
-                <input class="input" type="text" name="username" placeholder="Nhập username" required>
+            <div class="spacer-md">
+                <label>Tai khoan</label>
+                <input class="input" type="text" name="username" placeholder="Nhap username" required>
             </div>
-            <div style="margin-bottom:18px;">
-                <label>Mật khẩu</label>
-                <input class="input" type="password" name="password" placeholder="Nhập mật khẩu" required>
+
+            <div class="spacer-lg">
+                <label>Mat khau</label>
+                <input class="input" type="password" name="password" placeholder="Nhap mat khau" required>
             </div>
-            <button class="btn" type="submit" style="width:100%;">Đăng nhập</button>
+
+            <button class="btn btn-full" type="submit">Dang nhap</button>
         </form>
-        <div style="margin-top:18px; padding: 14px 16px; border-radius: 16px; background: rgba(96, 165, 250, 0.08); border: 1px solid rgba(96, 165, 250, 0.16);">
-            <p class="muted" style="margin:0;">Mặc định: <strong>admin / password</strong></p>
+
+        <div class="login-panel-note">
+            <p class="muted">Tai khoan mac dinh: <strong>admin / password</strong></p>
+        </div>
+
+        <div class="feature-list">
+            <div class="feature-item"><span class="feature-dot"></span><span>Tra cuu lien ket thuoc - benh theo top-k.</span></div>
+            <div class="feature-item"><span class="feature-dot"></span><span>Do thi 3D truc quan hoa quan he sinh hoc.</span></div>
+            <div class="feature-item"><span class="feature-dot"></span><span>Lich su truy van va khu vuc quan tri thong nhat.</span></div>
         </div>
     </div>
 </div>

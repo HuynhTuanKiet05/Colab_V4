@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model import gt_net_drug, gt_net_disease
-from model.rlg_layers import RelationAwareLayer, LayerAggregator
 import dgl
+
+from . import gt_net_drug, gt_net_disease
+from .rlg_layers import RelationAwareLayer, LayerAggregator
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

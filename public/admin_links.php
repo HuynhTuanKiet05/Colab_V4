@@ -22,16 +22,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'score' => $score,
                     'source_note' => $note
                 ]);
-                flash('success', 'Đã tạo liên kết mới thành công.');
+                flash('success', 'Da tao lien ket moi thanh cong.');
             } catch (PDOException $e) {
                 if ($e->getCode() == 23000) {
-                    flash('error', 'Lỗi: Liên kết giữa hai thực thể này đã tồn tại.');
+                    flash('error', 'Lien ket giua hai thuc the nay da ton tai.');
                 } else {
-                    flash('error', 'Lỗi CSDL: ' . $e->getMessage());
+                    flash('error', 'Loi CSDL: ' . $e->getMessage());
                 }
             }
         } else {
-            flash('error', 'Vui lòng chọn đầy đủ Thuốc và Bệnh.');
+            flash('error', 'Vui long chon day du Thuoc va Benh.');
         }
     }
 
@@ -39,7 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id = (int) ($_POST['id'] ?? 0);
         $stmt = db()->prepare('DELETE FROM drug_disease_links WHERE id = :id');
         $stmt->execute(['id' => $id]);
-        flash('success', 'Đã xóa liên kết.');
+        flash('success', 'Da xoa lien ket.');
     }
 
     redirect('admin_links.php');
@@ -52,7 +52,7 @@ $drugs = db()->query('SELECT id, name, source_code FROM drugs ORDER BY name ASC'
 $diseases = db()->query('SELECT id, name, source_code FROM diseases ORDER BY name ASC')->fetchAll();
 
 $links = db()->query('
-    SELECT l.*, dr.name as drug_name, dr.source_code as drug_code, di.name as disease_name, di.source_code as disease_code 
+    SELECT l.*, dr.name as drug_name, dr.source_code as drug_code, di.name as disease_name, di.source_code as disease_code
     FROM drug_disease_links l
     JOIN drugs dr ON l.drug_id = dr.id
     JOIN diseases di ON l.disease_id = di.id
@@ -64,94 +64,118 @@ $links = db()->query('
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin - Quản lý liên kết sinh học</title>
+    <title>Admin - Quan ly lien ket sinh hoc</title>
     <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
 <div class="container">
     <div class="navbar">
         <div>
-            <div class="brand">Quản lý liên kết sinh học</div>
-            <div class="muted">Tạo ground truth cho mô hình và kiểm soát dữ liệu quan hệ</div>
+            <div class="brand">Quan ly lien ket sinh hoc</div>
+            <div class="muted">Tao, kiem soat va lam sach cac lien ket Thuoc - Benh trong co so du lieu.</div>
         </div>
         <div class="nav-links">
-            <a class="btn" style="background: rgba(255,255,255,0.06); box-shadow:none;" href="admin.php">Quay lại Quản trị</a>
-            <a class="btn" style="background: rgba(244, 63, 94, 0.16); box-shadow:none;" href="logout.php">Đăng xuất</a>
+            <a class="btn btn-ghost" href="admin.php">Quay lai</a>
+            <a class="btn btn-danger" href="logout.php">Dang xuat</a>
         </div>
     </div>
 
     <?php if ($success): ?><div class="alert alert-success"><?= e($success) ?></div><?php endif; ?>
     <?php if ($error): ?><div class="alert alert-error"><?= e($error) ?></div><?php endif; ?>
 
-    <div class="grid grid-2" style="grid-template-columns: 430px 1fr;">
+    <div class="grid split-panel">
         <div class="glass-card">
-            <h3>Tạo liên kết Thuốc - Bệnh</h3>
-            <p class="muted" style="margin-bottom:20px;">Xác lập mối quan hệ để kiểm chứng hoặc bổ sung dữ liệu huấn luyện.</p>
+            <h3>Tao lien ket Thuoc - Benh</h3>
+            <p class="muted spacer-lg">Xac lap moi quan he de bo sung du lieu huan luyen, doi chieu ground truth va phuc vu kiem chung.</p>
             <form method="post">
                 <input type="hidden" name="action" value="create">
-                <div style="display:grid; gap:14px;">
+                <div class="stack-tight">
                     <div class="form-group">
-                        <label class="label">Chọn Thuốc</label>
+                        <label class="label">Chon Thuoc</label>
                         <select class="select" name="drug_id" required>
-                            <option value="">-- Chọn thuốc --</option>
-                            <?php foreach ($drugs as $d): ?><option value="<?= $d['id'] ?>"><?= e($d['name']) ?> (<?= e($d['source_code']) ?>)</option><?php endforeach; ?>
+                            <option value="">-- Chon thuoc --</option>
+                            <?php foreach ($drugs as $d): ?>
+                                <option value="<?= $d['id'] ?>"><?= e($d['name']) ?> (<?= e($d['source_code']) ?>)</option>
+                            <?php endforeach; ?>
                         </select>
                     </div>
+
                     <div class="form-group">
-                        <label class="label">Chọn Bệnh lý</label>
+                        <label class="label">Chon Benh ly</label>
                         <select class="select" name="disease_id" required>
-                            <option value="">-- Chọn bệnh --</option>
-                            <?php foreach ($diseases as $d): ?><option value="<?= $d['id'] ?>"><?= e($d['name']) ?> (<?= e($d['source_code']) ?>)</option><?php endforeach; ?>
+                            <option value="">-- Chon benh --</option>
+                            <?php foreach ($diseases as $d): ?>
+                                <option value="<?= $d['id'] ?>"><?= e($d['name']) ?> (<?= e($d['source_code']) ?>)</option>
+                            <?php endforeach; ?>
                         </select>
                     </div>
+
                     <div class="form-group">
-                        <label class="label">Loại liên kết</label>
+                        <label class="label">Loai lien ket</label>
                         <select class="select" name="association_type">
-                            <option value="known_positive">Đã biết (Dương tính)</option>
-                            <option value="known_negative">Đã biết (Âm tính)</option>
-                            <option value="predicted">Do mô hình dự đoán</option>
-                            <option value="validated">Đã được kiểm chứng lab</option>
+                            <option value="known_positive">Da biet duong tinh</option>
+                            <option value="known_negative">Da biet am tinh</option>
+                            <option value="predicted">Do mo hinh du doan</option>
+                            <option value="validated">Da duoc kiem chung</option>
                         </select>
                     </div>
+
                     <div class="form-group">
-                        <label class="label">Độ tin cậy (Score 0-1)</label>
+                        <label class="label">Do tin cay</label>
                         <input class="input" type="number" step="0.0001" name="score" value="1.0000">
                     </div>
+
                     <div class="form-group">
-                        <label class="label">Ghi chú nguồn dữ liệu</label>
-                        <input class="input" name="source_note" placeholder="Ví dụ: PubMed ID, ClinicalTrials.gov...">
+                        <label class="label">Ghi chu</label>
+                        <input class="input" name="source_note" placeholder="Vi du: PubMed ID, ClinicalTrials.gov...">
                     </div>
-                    <button class="btn" type="submit" style="width:100%;">Xác lập liên kết</button>
+
+                    <button class="btn btn-full" type="submit">Xac lap lien ket</button>
                 </div>
             </form>
         </div>
 
         <div class="glass-card">
-            <div style="display:flex; justify-content:space-between; align-items:end; margin-bottom:14px; gap:12px; flex-wrap:wrap;">
+            <div class="section-header">
                 <div>
-                    <h3>Danh sách liên kết thực tế</h3>
-                    <p class="muted">Hiển thị các liên kết gần nhất trong cơ sở dữ liệu.</p>
+                    <h3>Danh sach lien ket thuc te</h3>
+                    <p class="muted">Hien thi cac lien ket moi nhat trong co so du lieu.</p>
                 </div>
                 <div class="badge badge-drug"><?= count($links) ?> records</div>
             </div>
-            <div class="table-container" style="max-height: 700px; overflow-y:auto;">
+
+            <div class="table-container table-scroll">
                 <table class="table">
                     <thead>
-                        <tr><th>Thuốc</th><th>Bệnh lý</th><th>Loại</th><th>Score</th><th style="text-align:right;">Hành động</th></tr>
+                    <tr>
+                        <th>Thuoc</th>
+                        <th>Benh ly</th>
+                        <th>Loai</th>
+                        <th>Score</th>
+                        <th class="align-right">Hanh dong</th>
+                    </tr>
                     </thead>
                     <tbody>
-                    <?php if (empty($links)): ?><tr><td colspan="5" style="text-align:center; padding:40px;" class="muted">Chưa có liên kết nào được xác lập</td></tr><?php endif; ?>
+                    <?php if (empty($links)): ?>
+                        <tr><td colspan="5" class="center-empty">Chua co lien ket nao duoc xac lap.</td></tr>
+                    <?php endif; ?>
                     <?php foreach ($links as $row): ?>
                         <tr>
-                            <td><strong><?= e((string)$row['drug_name']) ?></strong><br><span class="badge badge-drug" style="font-size: 9px;"><?= e((string)$row['drug_code']) ?></span></td>
-                            <td><strong><?= e((string)$row['disease_name']) ?></strong><br><span class="badge badge-disease" style="font-size: 9px;"><?= e((string)$row['disease_code']) ?></span></td>
-                            <td><span class="badge" style="background: rgba(255,255,255,0.05); color:#cbd5e1; border:1px solid rgba(148,163,184,0.16);"><?= e((string)$row['association_type']) ?></span></td>
-                            <td class="score-text"><?= e(number_format((float)$row['score'], 4)) ?></td>
-                            <td style="text-align:right;">
-                                <form method="post" onsubmit="return confirm('Xóa liên kết này?');" style="display:inline;">
+                            <td>
+                                <strong><?= e((string) $row['drug_name']) ?></strong><br>
+                                <span class="badge badge-drug"><?= e((string) $row['drug_code']) ?></span>
+                            </td>
+                            <td>
+                                <strong><?= e((string) $row['disease_name']) ?></strong><br>
+                                <span class="badge badge-disease"><?= e((string) $row['disease_code']) ?></span>
+                            </td>
+                            <td><span class="badge badge-neutral"><?= e((string) $row['association_type']) ?></span></td>
+                            <td class="score-text"><?= e(number_format((float) $row['score'], 4)) ?></td>
+                            <td class="align-right">
+                                <form method="post" class="inline-form" onsubmit="return confirm('Xoa lien ket nay?');">
                                     <input type="hidden" name="action" value="delete">
-                                    <input type="hidden" name="id" value="<?= e((string)$row['id']) ?>">
-                                    <button class="btn" type="submit" style="height:40px; padding:0 14px; background: linear-gradient(135deg, #ef4444, #f97316);">Xóa</button>
+                                    <input type="hidden" name="id" value="<?= e((string) $row['id']) ?>">
+                                    <button class="btn btn-danger btn-sm" type="submit">Xoa</button>
                                 </form>
                             </td>
                         </tr>
