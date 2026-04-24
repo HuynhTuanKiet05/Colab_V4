@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import timeit
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +85,26 @@ DATASET_PRESETS = {
         "positive_weight_mode": "global_log",
     },
 }
+
+
+def resolve_amp_dtype(amp_arg, device):
+    """Resolve the mixed-precision dtype given the CLI flag and GPU capability.
+
+    Returns ``None`` to disable AMP entirely. Otherwise returns the torch dtype
+    to use inside ``torch.autocast``. BFloat16 requires Ampere or newer (CC>=8.0);
+    Turing (T4/V100) only has fp16 tensor cores, so 'auto' falls back to fp16 there.
+    """
+    if amp_arg == "none":
+        return None
+    if device.type != "cuda":
+        return None
+    if amp_arg == "bfloat16":
+        return torch.bfloat16
+    if amp_arg == "float16":
+        return torch.float16
+    # auto
+    major, _ = torch.cuda.get_device_capability(device)
+    return torch.bfloat16 if major >= 8 else torch.float16
 
 
 def resolve_device(device_name):
@@ -315,6 +336,7 @@ if __name__ == "__main__":
     parser.add_argument("--plateau_factor", default=0.5, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--ema_decay", default=0.995, type=float, help=argparse.SUPPRESS)
     parser.add_argument("--ema_warmup_epochs", default=80, type=int, help="epochs of plain training before EMA starts tracking; avoids random-init bias leaking into eval weights")
+    parser.add_argument("--amp", choices=["none", "auto", "bfloat16", "float16"], default="auto", help="automatic mixed precision dtype for forward/backward; 'auto' = bf16 on Ampere+, fp16 on Turing/T4; 'none' disables AMP")
 
     import sys as _sys
     _explicit = set()
@@ -388,6 +410,19 @@ if __name__ == "__main__":
         f"pair={args.pair_mode} | gate={args.gate_mode}"
     )
     logging.info(f"Training log file: {log_file}")
+
+    amp_dtype = resolve_amp_dtype(args.amp, device)
+    if amp_dtype is None:
+        logging.info("AMP: disabled (fp32)")
+        scaler = None
+    else:
+        gpu_name = torch.cuda.get_device_name(device) if device.type == "cuda" else device.type
+        logging.info(f"AMP: enabled (dtype={str(amp_dtype).rsplit('.', 1)[-1]}, device={gpu_name})")
+        # Only fp16 needs loss scaling (bf16 shares fp32 exponent range).
+        scaler = torch.amp.GradScaler(device.type) if amp_dtype == torch.float16 else None
+
+    def autocast_ctx():
+        return torch.autocast(device_type=device.type, dtype=amp_dtype) if amp_dtype is not None else nullcontext()
 
     data = get_data(args)
     args.drug_number = data["drug_number"]
@@ -554,44 +589,53 @@ if __name__ == "__main__":
                 )
 
             model.train()
-            _, train_score, aux_losses = model(
-                drdr_graph,
-                didi_graph,
-                drdipr_graph,
-                drug_feature,
-                disease_feature,
-                protein_feature,
-                x_train,
-                drug_topo_feat=drug_topo_feat,
-                disease_topo_feat=disease_topo_feat,
-                return_aux=True,
-            )
-            contrastive_loss = aux_losses.get("contrastive", train_score.new_tensor(0.0))
-            ce_loss = criterion(train_score, y_train)
-
-            if args.use_ranking and args.ranking_weight > 0:
-                ranking_term = ranking_loss(
-                    train_score,
-                    y_train,
-                    margin=args.ranking_margin,
-                    num_samples=args.ranking_samples,
-                    hard_weight=args.hard_negative_weight,
-                    hard_ratio=args.hard_neg_ratio,
+            with autocast_ctx():
+                _, train_score, aux_losses = model(
+                    drdr_graph,
+                    didi_graph,
+                    drdipr_graph,
+                    drug_feature,
+                    disease_feature,
+                    protein_feature,
+                    x_train,
+                    drug_topo_feat=drug_topo_feat,
+                    disease_topo_feat=disease_topo_feat,
+                    return_aux=True,
                 )
-            else:
-                ranking_term = train_score.new_tensor(0.0)
+                contrastive_loss = aux_losses.get("contrastive", train_score.new_tensor(0.0))
+                ce_loss = criterion(train_score, y_train)
 
-            train_loss = (
-                ce_loss
-                + args.contrastive_weight * contrastive_loss
-                + args.ranking_weight * ranking_term
-            )
+                if args.use_ranking and args.ranking_weight > 0:
+                    ranking_term = ranking_loss(
+                        train_score,
+                        y_train,
+                        margin=args.ranking_margin,
+                        num_samples=args.ranking_samples,
+                        hard_weight=args.hard_negative_weight,
+                        hard_ratio=args.hard_neg_ratio,
+                    )
+                else:
+                    ranking_term = train_score.new_tensor(0.0)
+
+                train_loss = (
+                    ce_loss
+                    + args.contrastive_weight * contrastive_loss
+                    + args.ranking_weight * ranking_term
+                )
 
             optimizer.zero_grad()
-            train_loss.backward()
-            if args.grad_clip > 0:
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
-            optimizer.step()
+            if scaler is not None:
+                scaler.scale(train_loss).backward()
+                if args.grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                train_loss.backward()
+                if args.grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+                optimizer.step()
             # Lazy-init EMA once base model is past --ema_warmup_epochs so the
             # shadow snapshot is seeded from trained weights (not random init).
             if args.use_ema and ema is None and (epoch + 1) >= args.ema_warmup_epochs:
@@ -604,7 +648,7 @@ if __name__ == "__main__":
                 if ema is not None:
                     ema.apply_to(model)
                 model.eval()
-                with torch.no_grad():
+                with torch.no_grad(), autocast_ctx():
                     _, test_score, diagnostics = model(
                         drdr_graph,
                         didi_graph,
