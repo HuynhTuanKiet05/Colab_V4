@@ -11,30 +11,29 @@ $rows = $stmt->fetchAll();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lich su tra cuu</title>
+    <title>Lịch sử tra cứu · AMNTDDA AI</title>
     <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
 <div class="container">
     <div class="navbar">
         <div>
-            <div class="brand">Lich su tra cuu</div>
-            <div class="muted">Luu lai toan bo cac truy van du doan da thuc hien truoc day.</div>
+            <div class="brand">Lịch sử tra cứu</div>
+            <div class="muted">Lưu lại toàn bộ các phiên chẩn đoán đã thực hiện trên hệ thống AMNTDDA AI.</div>
         </div>
         <div class="nav-links">
-            <a class="btn btn-ghost" href="index.php">Dashboard</a>
-            <a class="btn btn-ghost" href="compare_models.php">So sanh 2 mo hinh</a>
-            <a class="btn btn-danger" href="logout.php">Dang xuat</a>
+            <a class="btn btn-ghost" href="index.php">Trang chủ</a>
+            <a class="btn btn-danger" href="logout.php">Đăng xuất</a>
         </div>
     </div>
 
     <div class="glass-card">
         <div class="section-header">
             <div>
-                <h3>Nhat ky tra cuu</h3>
-                <p class="muted">Toan bo lich su du doan cua tai khoan hien tai duoc hien thi trong mot bang thong nhat.</p>
+                <h3>Nhật ký tra cứu</h3>
+                <p class="muted">Toàn bộ phiên chẩn đoán của tài khoản hiện tại được hiển thị trong một bảng thống nhất.</p>
             </div>
-            <div class="badge badge-drug"><?= count($rows) ?> records</div>
+            <div class="badge badge-drug"><?= count($rows) ?> bản ghi</div>
         </div>
 
         <div class="table-container">
@@ -42,16 +41,16 @@ $rows = $stmt->fetchAll();
                 <thead>
                 <tr>
                     <th>ID</th>
-                    <th>Kieu tra cuu</th>
-                    <th>Input</th>
-                    <th>Top-k</th>
-                    <th>Trang thai</th>
-                    <th>Thoi gian</th>
+                    <th>Kiểu tra cứu</th>
+                    <th>Truy vấn</th>
+                    <th>Top-K</th>
+                    <th>Trạng thái</th>
+                    <th>Thời gian</th>
                 </tr>
                 </thead>
                 <tbody>
                 <?php if (empty($rows)): ?>
-                    <tr><td colspan="6" class="center-empty">Chua co lich su tra cuu.</td></tr>
+                    <tr><td colspan="6" class="center-empty">Chưa có lịch sử tra cứu.</td></tr>
                 <?php endif; ?>
                 <?php foreach ($rows as $row): ?>
                     <tr>
@@ -59,7 +58,7 @@ $rows = $stmt->fetchAll();
                         <td><span class="badge badge-neutral"><?= e((string) $row['query_type']) ?></span></td>
                         <td><strong><?= e((string) $row['input_text']) ?></strong></td>
                         <td><span class="badge badge-drug">Top-<?= e((string) $row['top_k']) ?></span></td>
-                        <td><span class="badge badge-success">Done</span></td>
+                        <td><span class="badge badge-success">Hoàn tất</span></td>
                         <td class="muted"><?= e((string) $row['created_at']) ?></td>
                     </tr>
                 <?php endforeach; ?>

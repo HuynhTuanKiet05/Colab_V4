@@ -178,6 +178,59 @@ def dgl_similarity_view_graphs(data, args):
     return drug_graphs, disease_graphs, data
 
 
+def filter_positive_pairs(x_fold, y_fold):
+    """Return the subset of ``x_fold`` rows whose label in ``y_fold`` is 1.
+
+    Used to build the HGT heterograph from training positives only, avoiding
+    the BUG-09 behaviour where sampled negative pairs were being injected as
+    real ``('drug','association','disease')`` edges.
+    """
+    y_arr = np.asarray(y_fold).reshape(-1)
+    x_arr = np.asarray(x_fold)
+    if y_arr.shape[0] != x_arr.shape[0]:
+        raise ValueError(
+            f"x_fold and y_fold length mismatch: {x_arr.shape[0]} vs {y_arr.shape[0]}"
+        )
+    mask = y_arr.astype(int) == 1
+    return x_arr[mask]
+
+
+def resample_fold_negatives(data, fold_idx, rng):
+    """Replace the negative samples of fold ``fold_idx`` with a fresh draw
+    from ``data['unsample']`` while keeping the positive samples intact.
+
+    Returns a pair ``(new_x, new_y)`` of numpy arrays aligned with the
+    original ``X_train[fold_idx]`` / ``Y_train[fold_idx]`` shape conventions,
+    or ``(None, None)`` if no unsampled negatives remain.
+    """
+    unsample = data.get("unsample")
+    if unsample is None or len(unsample) == 0:
+        return None, None
+
+    x_fold = np.asarray(data["X_train"][fold_idx])
+    y_fold = np.asarray(data["Y_train"][fold_idx]).reshape(-1).astype(int)
+
+    pos_mask = y_fold == 1
+    neg_mask = ~pos_mask
+    pos_pairs = x_fold[pos_mask]
+    n_neg = int(neg_mask.sum())
+    if n_neg == 0:
+        return None, None
+
+    pool = np.asarray(unsample)
+    size = int(min(n_neg, len(pool)))
+    choice = rng.choice(len(pool), size=size, replace=False)
+    new_neg = pool[choice]
+
+    new_x = np.concatenate([pos_pairs, new_neg], axis=0)
+    new_y = np.concatenate(
+        [np.ones(len(pos_pairs), dtype=np.float64), np.zeros(len(new_neg), dtype=np.float64)],
+        axis=0,
+    ).reshape(-1, 1)
+
+    return new_x.astype(int), new_y
+
+
 def dgl_heterograph(data, drdi, args):
     def to_edge_tuple(edges):
         if edges.size == 0:

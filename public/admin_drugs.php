@@ -17,14 +17,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'smiles' => $smiles,
             'description' => $description
         ]);
-        flash('success', 'Da them thuoc moi.');
+        flash('success', 'Đã thêm thuốc mới.');
     }
 
     if ($action === 'delete') {
         $id = (int) ($_POST['id'] ?? 0);
         $stmt = db()->prepare('DELETE FROM drugs WHERE id = :id');
         $stmt->execute(['id' => $id]);
-        flash('success', 'Da xoa thuoc.');
+        flash('success', 'Đã xoá thuốc.');
     }
 
     redirect('admin_drugs.php');
@@ -38,19 +38,19 @@ $rows = db()->query('SELECT * FROM drugs ORDER BY created_at DESC LIMIT 50')->fe
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin - Quan ly thuoc</title>
+    <title>Quản lý thuốc · AMNTDDA AI</title>
     <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
 <div class="container">
     <div class="navbar">
         <div>
-            <div class="brand">Quan ly thuoc</div>
-            <div class="muted">Them, xoa va theo doi cac thuc the thuoc trong co so du lieu.</div>
+            <div class="brand">Quản lý thuốc</div>
+            <div class="muted">Thêm, xoá và theo dõi các thực thể thuốc trong cơ sở dữ liệu.</div>
         </div>
         <div class="nav-links">
-            <a class="btn btn-ghost" href="admin.php">Quay lai</a>
-            <a class="btn btn-danger" href="logout.php">Dang xuat</a>
+            <a class="btn btn-ghost" href="admin.php">Quay lại</a>
+            <a class="btn btn-danger" href="logout.php">Đăng xuất</a>
         </div>
     </div>
 
@@ -58,28 +58,28 @@ $rows = db()->query('SELECT * FROM drugs ORDER BY created_at DESC LIMIT 50')->fe
 
     <div class="grid split-panel">
         <div class="glass-card">
-            <h3>Them thuc the thuoc moi</h3>
-            <p class="muted spacer-lg">Dien thong tin dinh danh va dac trung hoa hoc co ban de bo sung cho du lieu quan tri.</p>
+            <h3>Thêm thực thể thuốc mới</h3>
+            <p class="muted spacer-lg">Điền thông tin định danh và đặc trưng hoá học cơ bản để bổ sung vào dữ liệu quản trị.</p>
             <form method="post">
                 <input type="hidden" name="action" value="create">
                 <div class="stack-tight">
                     <div class="form-group">
-                        <label class="label">Ma nguon</label>
-                        <input class="input" name="source_code" placeholder="Vi du: DB00014" required>
+                        <label class="label">Mã nguồn</label>
+                        <input class="input" name="source_code" placeholder="Ví dụ: DB00014" required>
                     </div>
                     <div class="form-group">
-                        <label class="label">Ten thuoc</label>
-                        <input class="input" name="name" placeholder="Vi du: Goserelin" required>
+                        <label class="label">Tên thuốc</label>
+                        <input class="input" name="name" placeholder="Ví dụ: Goserelin" required>
                     </div>
                     <div class="form-group">
-                        <label class="label">Cau truc SMILES</label>
-                        <textarea class="input" name="smiles" placeholder="Danh cho thong tin cau truc phan tu..."></textarea>
+                        <label class="label">Cấu trúc SMILES</label>
+                        <textarea class="input" name="smiles" placeholder="Dành cho thông tin cấu trúc phân tử..."></textarea>
                     </div>
                     <div class="form-group">
-                        <label class="label">Mo ta</label>
-                        <textarea class="input" name="description" placeholder="Thong tin bo sung ve thuoc..."></textarea>
+                        <label class="label">Mô tả</label>
+                        <textarea class="input" name="description" placeholder="Thông tin bổ sung về thuốc..."></textarea>
                     </div>
-                    <button class="btn btn-full" type="submit">Luu thong tin</button>
+                    <button class="btn btn-full" type="submit">Lưu thông tin</button>
                 </div>
             </form>
         </div>
@@ -87,10 +87,10 @@ $rows = db()->query('SELECT * FROM drugs ORDER BY created_at DESC LIMIT 50')->fe
         <div class="glass-card">
             <div class="section-header">
                 <div>
-                    <h3>Danh sach thuoc</h3>
-                    <p class="muted">Hien thi toi da 50 ban ghi moi nhat.</p>
+                    <h3>Danh sách thuốc</h3>
+                    <p class="muted">Hiển thị tối đa 50 bản ghi mới nhất.</p>
                 </div>
-                <div class="badge badge-drug"><?= count($rows) ?> records</div>
+                <div class="badge badge-drug"><?= count($rows) ?> bản ghi</div>
             </div>
 
             <div class="table-container table-scroll">
@@ -98,14 +98,14 @@ $rows = db()->query('SELECT * FROM drugs ORDER BY created_at DESC LIMIT 50')->fe
                     <thead>
                     <tr>
                         <th>ID</th>
-                        <th>Ma nguon</th>
-                        <th>Ten thuoc</th>
-                        <th class="align-right">Hanh dong</th>
+                        <th>Mã nguồn</th>
+                        <th>Tên thuốc</th>
+                        <th class="align-right">Thao tác</th>
                     </tr>
                     </thead>
                     <tbody>
                     <?php if (empty($rows)): ?>
-                        <tr><td colspan="4" class="center-empty">Chua co du lieu thuoc.</td></tr>
+                        <tr><td colspan="4" class="center-empty">Chưa có dữ liệu thuốc.</td></tr>
                     <?php endif; ?>
                     <?php foreach ($rows as $row): ?>
                         <tr>
@@ -113,10 +113,10 @@ $rows = db()->query('SELECT * FROM drugs ORDER BY created_at DESC LIMIT 50')->fe
                             <td><span class="badge badge-drug"><?= e((string) $row['source_code']) ?></span></td>
                             <td><strong><?= e((string) $row['name']) ?></strong></td>
                             <td class="align-right">
-                                <form method="post" class="inline-form" onsubmit="return confirm('Ban co chac chan muon xoa thuoc nay?');">
+                                <form method="post" class="inline-form" onsubmit="return confirm('Bạn có chắc chắn muốn xoá thuốc này?');">
                                     <input type="hidden" name="action" value="delete">
                                     <input type="hidden" name="id" value="<?= e((string) $row['id']) ?>">
-                                    <button class="btn btn-danger btn-sm" type="submit">Xoa</button>
+                                    <button class="btn btn-danger btn-sm" type="submit">Xoá</button>
                                 </form>
                             </td>
                         </tr>
