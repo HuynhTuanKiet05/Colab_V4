@@ -3,25 +3,186 @@ require_once __DIR__ . '/../app/services/PredictionService.php';
 require_login();
 
 $user = current_user();
+$allowedDatasets = ['B-dataset', 'C-dataset', 'F-dataset'];
+$dataset = $_POST['dataset'] ?? 'C-dataset';
+$dataset = in_array($dataset, $allowedDatasets, true) ? $dataset : 'C-dataset';
+$topK = max(1, min(20, (int) ($_POST['top_k'] ?? 5)));
+$drugInput = trim((string) ($_POST['drugs'] ?? ''));
+$diseaseInput = trim((string) ($_POST['diseases'] ?? ''));
 $resultData = null;
 $error = null;
-$queryType = $_POST['query_type'] ?? 'drug_to_disease';
-$inputText = trim($_POST['input_text'] ?? '');
-$dataset = $_POST['dataset'] ?? 'C-dataset';
-$topK = max(1, min(20, (int) ($_POST['top_k'] ?? 10)));
 $apiHealthy = PredictionService::isApiHealthy();
 
+if (empty($_SESSION['_csrf_compare_models'])) {
+    $_SESSION['_csrf_compare_models'] = bin2hex(random_bytes(16));
+}
+$csrfToken = $_SESSION['_csrf_compare_models'];
+
+function parse_compare_entities(string $raw): array
+{
+    $parts = preg_split('/[\r\n,;]+/', $raw) ?: [];
+    $items = [];
+    $seen = [];
+    foreach ($parts as $part) {
+        $value = trim($part);
+        if ($value === '') {
+            continue;
+        }
+        $key = strtolower($value);
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $items[] = $value;
+        $seen[$key] = true;
+    }
+    return $items;
+}
+
+function format_score(mixed $score): string
+{
+    return number_format((float) $score, 4);
+}
+
+function dataset_counts(string $dataset): array
+{
+    $base = realpath(__DIR__ . '/../AMDGT_original/data/' . $dataset);
+    $countCsvRows = static function (?string $base, string $file): int {
+        if ($base === null) {
+            return 0;
+        }
+        $path = $base . DIRECTORY_SEPARATOR . $file;
+        if (!is_file($path)) {
+            return 0;
+        }
+        $handle = @fopen($path, 'r');
+        if ($handle === false) {
+            return 0;
+        }
+        $rows = 0;
+        while (fgets($handle) !== false) {
+            $rows++;
+        }
+        fclose($handle);
+        return max(0, $rows - 1);
+    };
+    return [
+        'drugs' => $countCsvRows($base ?: null, 'DrugFingerprint.csv'),
+        'diseases' => $countCsvRows($base ?: null, 'DiseaseGIP.csv'),
+        'pairs' => $countCsvRows($base ?: null, 'DrugDiseaseAssociationNumber.csv'),
+    ];
+}
+
+function render_compare_graph(array $graph): string
+{
+    $nodes = $graph['nodes'] ?? [];
+    $links = $graph['links'] ?? [];
+    $drugs = [];
+    $diseases = [];
+    foreach ($nodes as $node) {
+        if (($node['type'] ?? '') === 'drug') {
+            $drugs[] = $node;
+        } elseif (($node['type'] ?? '') === 'disease') {
+            $diseases[] = $node;
+        }
+    }
+
+    $rowCount = max(count($drugs), count($diseases), 1);
+    $height = max(360, 110 + ($rowCount * 82));
+    $leftX = 190;
+    $rightX = 910;
+    $topPad = 70;
+    $bottomPad = 54;
+    $usableHeight = $height - $topPad - $bottomPad;
+    $drugPositions = [];
+    $diseasePositions = [];
+
+    foreach ($drugs as $index => $node) {
+        $y = $topPad + (($index + 0.5) * $usableHeight / max(count($drugs), 1));
+        $drugPositions[$node['id']] = [$leftX, $y, $node];
+    }
+    foreach ($diseases as $index => $node) {
+        $y = $topPad + (($index + 0.5) * $usableHeight / max(count($diseases), 1));
+        $diseasePositions[$node['id']] = [$rightX, $y, $node];
+    }
+
+    ob_start();
+    ?>
+    <svg class="compare-network" viewBox="0 0 1100 <?= e((string) $height) ?>" role="img" aria-label="Sơ đồ liên kết 2D thuốc - bệnh">
+        <defs>
+            <marker id="arrow-improved" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#198754"></path>
+            </marker>
+            <marker id="arrow-original" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#d97706"></path>
+            </marker>
+        </defs>
+        <text x="110" y="34" class="compare-network-title">Thuốc</text>
+        <text x="845" y="34" class="compare-network-title">Bệnh</text>
+        <?php foreach ($links as $link): ?>
+            <?php
+            $source = $drugPositions[$link['source'] ?? ''] ?? null;
+            $target = $diseasePositions[$link['target'] ?? ''] ?? null;
+            if (!$source || !$target) {
+                continue;
+            }
+            $delta = (float) ($link['delta'] ?? 0);
+            $score = max(0.05, min(1.0, (float) ($link['improved_score'] ?? 0)));
+            $stroke = $delta >= 0 ? '#198754' : '#d97706';
+            $marker = $delta >= 0 ? 'url(#arrow-improved)' : 'url(#arrow-original)';
+            $width = 1.5 + ($score * 5);
+            $midX = ((float) $source[0] + (float) $target[0]) / 2;
+            $midY = ((float) $source[1] + (float) $target[1]) / 2;
+            ?>
+            <path d="M <?= e((string) $source[0]) ?> <?= e((string) $source[1]) ?> C 410 <?= e((string) $source[1]) ?>, 690 <?= e((string) $target[1]) ?>, <?= e((string) $target[0]) ?> <?= e((string) $target[1]) ?>"
+                  stroke="<?= e($stroke) ?>" stroke-width="<?= e(number_format($width, 2)) ?>" marker-end="<?= e($marker) ?>" class="compare-edge"></path>
+            <g class="compare-edge-label">
+                <rect x="<?= e((string) ($midX - 58)) ?>" y="<?= e((string) ($midY - 14)) ?>" width="116" height="28" rx="8"></rect>
+                <text x="<?= e((string) $midX) ?>" y="<?= e((string) ($midY + 4)) ?>">I <?= e(format_score($link['improved_score'] ?? 0)) ?> / Δ <?= e(format_score($delta)) ?></text>
+            </g>
+        <?php endforeach; ?>
+
+        <?php foreach ($drugPositions as $position): ?>
+            <?php [$x, $y, $node] = $position; ?>
+            <g class="compare-node compare-node-drug">
+                <circle cx="<?= e((string) $x) ?>" cy="<?= e((string) $y) ?>" r="12"></circle>
+                <rect x="<?= e((string) ($x - 150)) ?>" y="<?= e((string) ($y - 24)) ?>" width="132" height="48" rx="8"></rect>
+                <text x="<?= e((string) ($x - 84)) ?>" y="<?= e((string) ($y - 3)) ?>"><?= e((string) ($node['label'] ?? $node['actual_id'] ?? 'Thuốc')) ?></text>
+                <text x="<?= e((string) ($x - 84)) ?>" y="<?= e((string) ($y + 15)) ?>" class="compare-node-id"><?= e((string) ($node['actual_id'] ?? '')) ?></text>
+            </g>
+        <?php endforeach; ?>
+
+        <?php foreach ($diseasePositions as $position): ?>
+            <?php [$x, $y, $node] = $position; ?>
+            <g class="compare-node compare-node-disease">
+                <circle cx="<?= e((string) $x) ?>" cy="<?= e((string) $y) ?>" r="12"></circle>
+                <rect x="<?= e((string) ($x + 18)) ?>" y="<?= e((string) ($y - 24)) ?>" width="150" height="48" rx="8"></rect>
+                <text x="<?= e((string) ($x + 93)) ?>" y="<?= e((string) ($y - 3)) ?>"><?= e((string) ($node['label'] ?? $node['actual_id'] ?? 'Bệnh')) ?></text>
+                <text x="<?= e((string) ($x + 93)) ?>" y="<?= e((string) ($y + 15)) ?>" class="compare-node-id"><?= e((string) ($node['actual_id'] ?? '')) ?></text>
+            </g>
+        <?php endforeach; ?>
+    </svg>
+    <?php
+    return (string) ob_get_clean();
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if ($inputText === '') {
-        $error = 'Vui long nhap ten thuoc hoac benh.';
+    $submittedToken = (string) ($_POST['csrf_token'] ?? '');
+    $drugs = parse_compare_entities($drugInput);
+    $diseases = parse_compare_entities($diseaseInput);
+
+    if (!hash_equals($csrfToken, $submittedToken)) {
+        $error = 'Phiên làm việc không hợp lệ. Vui lòng tải lại trang.';
     } elseif (!$apiHealthy) {
-        $error = 'He thong AI hien dang ngoai tuyen. Vui long kiem tra lai server.';
+        $error = 'Python API đang ngoại tuyến. Vui lòng khởi động FastAPI ở cổng 8000.';
+    } elseif (empty($drugs) || empty($diseases)) {
+        $error = 'Vui lòng chọn ít nhất 1 thuốc và 1 bệnh.';
+    } elseif (count($drugs) > 5 || count($diseases) > 5) {
+        $error = 'Chỉ được chọn tối đa 5 thuốc và 5 bệnh trong một lần chẩn đoán.';
     } else {
         try {
-            $resultData = PredictionService::callPythonApi($queryType, $inputText, $topK, $dataset);
-            PredictionService::saveHistory((int) $user['id'], $queryType, $inputText, $topK, $resultData);
-            flash('success', 'Du doan thanh cong');
-            $_SESSION['latest_graph'] = $resultData['graph'] ?? ['nodes' => [], 'links' => []];
+            $resultData = PredictionService::comparePredict($drugs, $diseases, $topK, $dataset);
+            PredictionService::saveComparisonHistory((int) $user['id'], $dataset, $drugs, $diseases, $topK, $resultData);
+            flash('success', 'Đã chạy so sánh 2 mô hình thành công.');
         } catch (Throwable $e) {
             $error = $e->getMessage();
         }
@@ -29,69 +190,139 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $success = flash('success');
-$graph = $resultData['graph'] ?? ($_SESSION['latest_graph'] ?? ['nodes' => [], 'links' => []]);
-$graphStats = ['drug' => 0, 'disease' => 0, 'protein' => 0];
-foreach (($graph['nodes'] ?? []) as $node) {
-    $type = strtolower((string) ($node['type'] ?? ''));
-    if (array_key_exists($type, $graphStats)) {
-        $graphStats[$type]++;
+$counts = dataset_counts($dataset);
+$comparisonRows = $resultData['comparison'] ?? [];
+$chartRows = array_slice($comparisonRows, 0, 10);
+$chartLabels = array_map(
+    fn ($row) => ($row['drug_id'] ?? '') . ' / ' . ($row['disease_id'] ?? ''),
+    $chartRows
+);
+$chartOriginal = array_map(fn ($row) => (float) ($row['original_score'] ?? 0), $chartRows);
+$chartImproved = array_map(fn ($row) => (float) ($row['improved_score'] ?? 0), $chartRows);
+$chartDelta = array_map(fn ($row) => (float) ($row['delta'] ?? 0), $chartRows);
+$pairCount = count($comparisonRows);
+$improvedWins = 0;
+$originalWins = 0;
+$totalDelta = 0.0;
+$topImprovedRow = null;
+foreach ($comparisonRows as $row) {
+    $winner = (string) ($row['winner'] ?? 'tie');
+    if ($winner === 'improved') {
+        $improvedWins++;
+    } elseif ($winner === 'original') {
+        $originalWins++;
+    }
+    $totalDelta += (float) ($row['delta'] ?? 0);
+    if ($topImprovedRow === null || (float) ($row['improved_score'] ?? 0) > (float) ($topImprovedRow['improved_score'] ?? 0)) {
+        $topImprovedRow = $row;
     }
 }
-
-$historyStmt = db()->prepare('SELECT * FROM prediction_requests WHERE user_id = :user_id ORDER BY created_at DESC LIMIT 8');
-$historyStmt->execute(['user_id' => $user['id']]);
-$histories = $historyStmt->fetchAll();
+$averageDelta = $pairCount > 0 ? $totalDelta / $pairCount : 0.0;
+$leadRate = $pairCount > 0 ? ($improvedWins / $pairCount) * 100 : 0.0;
+$topImprovedPair = $topImprovedRow
+    ? (($topImprovedRow['drug_id'] ?? '') . ' / ' . ($topImprovedRow['disease_id'] ?? ''))
+    : 'Chưa có dữ liệu';
 ?>
 <!DOCTYPE html>
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HGT AI Dashboard</title>
+    <title>AMNTDDA AI · Chẩn đoán liên kết thuốc - bệnh</title>
     <link rel="stylesheet" href="assets/style.css">
-    <script src="https://unpkg.com/force-graph"></script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@400;500;700&display=swap">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-<div id="loader" class="loading-overlay">Dang phan tich do thi...</div>
-<div id="toast-container" class="toast-container"></div>
-
+<div id="loader" class="loading-overlay">Đang chạy 2 mô hình trên cùng tập đầu vào...</div>
 <div class="container">
     <div class="navbar">
         <div>
-            <div class="brand">AMNTDDA Dashboard</div>
-            <div class="muted">He thong du doan lien ket thuoc - benh voi giao dien thong nhat, sang va de theo doi.</div>
+            <div class="brand">AMNTDDA AI</div>
+            <div class="muted">Nền tảng dự đoán &amp; so sánh liên kết Thuốc – Bệnh trên đồ thị HGT.</div>
         </div>
         <div class="nav-links">
-            <a class="btn btn-ghost" href="compare_models.php">So sanh 2 mo hinh</a>
-            <a class="btn btn-ghost" href="history.php">Lich su</a>
+            <a class="btn btn-sm" href="#compare-form-panel">Bắt đầu chẩn đoán</a>
+            <a class="btn btn-ghost btn-sm" href="history.php">Lịch sử</a>
             <?php if (($user['role'] ?? '') === 'admin'): ?>
-                <a class="btn btn-ghost" href="admin.php">Quan tri</a>
+                <a class="btn btn-ghost btn-sm" href="admin.php">Quản trị</a>
             <?php endif; ?>
-            <a class="btn btn-danger" href="logout.php">Dang xuat</a>
+            <a class="btn btn-danger btn-sm" href="logout.php">Đăng xuất</a>
         </div>
     </div>
 
-    <div class="glass-card hero-banner">
+    <div class="app-shell">
+        <aside class="side-nav glass-card">
+            <div class="side-nav-title-wrap">
+                <div class="side-nav-title">AMNTDDA</div>
+                <div class="side-nav-meta">Precision Medical AI</div>
+            </div>
+            <div class="side-nav-menu">
+                <a class="side-nav-item side-nav-item-active" href="#overview"><span class="material-symbols-outlined">dashboard</span><span>Tổng quan</span></a>
+                <a class="side-nav-item" href="#compare-form-panel"><span class="material-symbols-outlined">tune</span><span>Chẩn đoán</span></a>
+                <a class="side-nav-item" href="<?= $resultData ? '#result-overview' : '#quick-start' ?>"><span class="material-symbols-outlined"><?= $resultData ? 'insights' : 'menu_book' ?></span><span><?= $resultData ? 'Kết quả' : 'Hướng dẫn' ?></span></a>
+                <a class="side-nav-item" href="history.php"><span class="material-symbols-outlined">history</span><span>Lịch sử</span></a>
+                <?php if (($user['role'] ?? '') === 'admin'): ?>
+                    <a class="side-nav-item" href="admin.php"><span class="material-symbols-outlined">admin_panel_settings</span><span>Quản trị</span></a>
+                <?php endif; ?>
+            </div>
+        </aside>
+        <div class="main-shell">
+
+    <div class="glass-card hero-banner" id="overview">
         <div class="hero-grid">
-            <div>
-                <div class="badge badge-drug spacer-md">AI Graph Prediction</div>
-                <h1>Tra cuu lien ket thuoc - benh nhanh hon va de doc hon</h1>
-                <p class="muted spacer-lg">Nhap ten thuoc, benh hoac ma ID. He thong se chay mo hinh HGT va tra ve top-k lien ket co xac suat cao nhat, kem do thi 3D truc quan.</p>
+            <div class="hero-pitch">
+                <span class="badge badge-drug">AI Graph Prediction · MVP</span>
+                <h1>Bảng điều khiển chẩn đoán Thuốc – Bệnh gọn, rõ và sẵn sàng để demo.</h1>
+                <p class="muted">Một màn hình duy nhất để chọn dữ liệu, chạy song song mô hình gốc và mô hình cải tiến, rồi đọc kết quả bằng bảng điểm, delta và sơ đồ liên kết.</p>
+                <div class="hero-actions">
+                    <a class="btn" href="#compare-form-panel">Bắt đầu chẩn đoán</a>
+                    <a class="btn btn-ghost" href="<?= $resultData ? '#result-overview' : '#quick-start' ?>"><?= $resultData ? 'Xem kết quả hiện tại' : 'Xem quy trình sử dụng' ?></a>
+                </div>
+                <div class="hero-bullets">
+                    <div class="hero-bullet">So sánh trực tiếp mô hình gốc và mô hình cải tiến trên cùng đầu vào.</div>
+                    <div class="hero-bullet">Làm việc với 3 bộ dữ liệu chuẩn: B-dataset, C-dataset và F-dataset.</div>
+                    <div class="hero-bullet">Đọc kết quả theo ba lớp: bảng điểm, delta và sơ đồ liên kết 2D.</div>
+                </div>
             </div>
             <div class="status-card">
-                <div class="label">Trang thai AI API</div>
-                <div class="spacer-md"></div>
+                <div class="label">Trạng thái hệ thống</div>
                 <span class="badge <?= $apiHealthy ? 'badge-success' : 'badge-neutral' ?>">
-                    <?= $apiHealthy ? 'Online' : 'Offline' ?>
+                    <?= $apiHealthy ? 'AI API · Trực tuyến' : 'AI API · Ngoại tuyến' ?>
                 </span>
-                <p class="muted spacer-md"></p>
-                <p class="muted"><?= $apiHealthy ? 'Server AI dang san sang xu ly du doan.' : 'Can khoi dong Python API o cong 8000.' ?></p>
+                <p class="muted"><?= $apiHealthy ? 'Server FastAPI sẵn sàng phục vụ chẩn đoán.' : 'Hãy khởi động Python API ở cổng 8000.' ?></p>
+                <div class="status-card-row">
+                    <span>Bộ dữ liệu hiện hành</span>
+                    <span><?= e($dataset) ?></span>
+                </div>
+                <div class="status-card-row">
+                    <span>Phiên bản mô hình</span>
+                    <span>HGT + MVA · Improved</span>
+                </div>
+                <div class="status-card-row">
+                    <span>Top-K mặc định</span>
+                    <span><?= e((string) $topK) ?></span>
+                </div>
+                <div class="status-mini-grid">
+                    <div class="status-mini-tile">
+                        <strong>3</strong>
+                        <span>Bộ dữ liệu</span>
+                    </div>
+                    <div class="status-mini-tile">
+                        <strong>2</strong>
+                        <span>Mô hình</span>
+                    </div>
+                    <div class="status-mini-tile">
+                        <strong>1–20</strong>
+                        <span>Top-K</span>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
     <?php if (!$apiHealthy): ?>
-        <div class="alert alert-error">Canh bao: Python HGT-API o cong 8000 dang ngat ket noi.</div>
+        <div class="alert alert-error">Cảnh báo: Python AI API ở cổng 8000 đang ngắt kết nối. Vui lòng khởi động trước khi chạy chẩn đoán.</div>
     <?php endif; ?>
     <?php if ($error): ?>
         <div class="alert alert-error"><?= e($error) ?></div>
@@ -100,657 +331,456 @@ $histories = $historyStmt->fetchAll();
         <div class="alert alert-success"><?= e($success) ?></div>
     <?php endif; ?>
 
-    <div class="glass-card search-container">
+    <div class="stats-row">
+        <div class="stat-tile stat-tile-drug">
+            <div class="stat-tile-label">Tổng số thuốc</div>
+            <div class="stat-tile-value"><?= number_format($counts['drugs']) ?></div>
+            <div class="stat-tile-sub">Thực thể thuốc trong <?= e($dataset) ?></div>
+        </div>
+        <div class="stat-tile stat-tile-disease">
+            <div class="stat-tile-label">Tổng số bệnh</div>
+            <div class="stat-tile-value"><?= number_format($counts['diseases']) ?></div>
+            <div class="stat-tile-sub">Thực thể bệnh trong <?= e($dataset) ?></div>
+        </div>
+        <div class="stat-tile stat-tile-link">
+            <div class="stat-tile-label">Cặp liên kết đã biết</div>
+            <div class="stat-tile-value"><?= number_format($counts['pairs']) ?></div>
+            <div class="stat-tile-sub">Số cặp Thuốc – Bệnh có nhãn dương trong dữ liệu huấn luyện.</div>
+        </div>
+        <div class="stat-tile stat-tile-model">
+            <div class="stat-tile-label">Mô hình triển khai</div>
+            <div class="stat-tile-value">2</div>
+            <div class="stat-tile-sub">Mô hình gốc &amp; mô hình cải tiến cùng chạy trực tiếp trên web.</div>
+            <span class="stat-tile-pill <?= $apiHealthy ? 'pill-success' : 'pill-warn' ?>"><?= $apiHealthy ? 'Sẵn sàng' : 'Tạm dừng' ?></span>
+        </div>
+    </div>
+
+    <div class="glass-card search-container" id="compare-form-panel">
         <div class="section-header">
             <div>
-                <h2>He thong du doan lien ket Thuoc - Benh</h2>
-                <p class="muted">Chon dataset, nhap tu khoa va lay ket qua top-k theo nhu cau.</p>
+                <h2>Advanced Configuration Interface</h2>
+                <p class="muted">Thiết lập tham số tìm kiếm và so sánh mô hình.</p>
+            </div>
+            <span class="badge <?= $apiHealthy ? 'badge-success' : 'badge-neutral' ?>"><?= $apiHealthy ? 'API trực tuyến' : 'API ngoại tuyến' ?></span>
+        </div>
+
+        <div class="diagnosis-layout">
+            <form method="post" id="compare-form" class="diagnosis-main" onsubmit="document.getElementById('loader').style.display='grid'">
+                <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                <input type="hidden" name="drugs" id="drugs-hidden" value="<?= e($drugInput) ?>">
+                <input type="hidden" name="diseases" id="diseases-hidden" value="<?= e($diseaseInput) ?>">
+                <div class="compare-form-grid">
+                    <div class="compare-form-row">
+                        <div class="form-group">
+                            <label class="label">Bộ dữ liệu</label>
+                            <select class="select" name="dataset" id="dataset-select">
+                                <?php foreach ($allowedDatasets as $option): ?>
+                                    <option value="<?= e($option) ?>" <?= $dataset === $option ? 'selected' : '' ?>><?= e($option) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="label">Top-K kết quả</label>
+                            <input class="input" type="number" name="top_k" min="1" max="20" value="<?= e((string) $topK) ?>">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="label">Danh sách thuốc · tối đa 5</label>
+                        <div class="entity-picker" id="drug-picker">
+                            <div class="entity-picker-tags" id="drug-tags"></div>
+                            <input type="text" class="entity-picker-search" id="drug-search" placeholder="Tìm kiếm thuốc theo tên hoặc mã ID..." autocomplete="off">
+                            <div class="entity-picker-list" id="drug-list"><div class="entity-picker-msg">Đang tải dữ liệu...</div></div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="label">Danh sách bệnh · tối đa 5</label>
+                        <div class="entity-picker" id="disease-picker">
+                            <div class="entity-picker-tags" id="disease-tags"></div>
+                            <input type="text" class="entity-picker-search" id="disease-search" placeholder="Tìm kiếm bệnh theo tên hoặc mã ID..." autocomplete="off">
+                            <div class="entity-picker-list" id="disease-list"><div class="entity-picker-msg">Đang tải dữ liệu...</div></div>
+                        </div>
+                    </div>
+                    <div class="form-group compare-action">
+                        <button class="btn btn-full" type="submit" <?= !$apiHealthy ? 'disabled' : '' ?>>Chạy chẩn đoán &amp; so sánh 2 mô hình</button>
+                    </div>
+                </div>
+            </form>
+            <div class="diagnosis-aside">
+                <div class="diagnosis-panel">
+                    <span class="label">Phiên chạy hiện tại</span>
+                    <div class="diagnosis-kv">
+                        <span>Dataset</span>
+                        <strong><?= e($dataset) ?></strong>
+                    </div>
+                    <div class="diagnosis-kv">
+                        <span>Giới hạn đầu vào</span>
+                        <strong>5 thuốc / 5 bệnh</strong>
+                    </div>
+                    <div class="diagnosis-kv">
+                        <span>Top-K hiện tại</span>
+                        <strong><?= e((string) $topK) ?></strong>
+                    </div>
+                    <div class="diagnosis-kv">
+                        <span>API</span>
+                        <strong><?= $apiHealthy ? 'Trực tuyến' : 'Ngoại tuyến' ?></strong>
+                    </div>
+                </div>
+                <div class="diagnosis-panel">
+                    <span class="label">Bạn sẽ nhận được</span>
+                    <div class="diagnosis-list">
+                        <div class="diagnosis-list-item">
+                            <strong>Hai bảng kết quả song song</strong>
+                            <span>Mô hình gốc và mô hình cải tiến hiển thị cạnh nhau để đọc nhanh.</span>
+                        </div>
+                        <div class="diagnosis-list-item">
+                            <strong>Bảng delta để so sánh chất lượng</strong>
+                            <span>Xem chênh lệch điểm và mô hình thắng cho từng cặp Thuốc – Bệnh.</span>
+                        </div>
+                        <div class="diagnosis-list-item">
+                            <strong>Biểu đồ trực quan cho phần trình bày</strong>
+                            <span>Biểu đồ cột và sơ đồ 2D giúp giải thích kết quả rõ ràng hơn.</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <?php if ($resultData): ?>
+        <div class="stats-row results-summary-row section-spaced" id="result-overview">
+            <div class="stat-tile stat-tile-link">
+                <div class="stat-tile-label">Cặp đã phân tích</div>
+                <div class="stat-tile-value"><?= number_format($pairCount) ?></div>
+                <div class="stat-tile-sub">Tổng số cặp Thuốc – Bệnh được xử lý trong lần chạy này.</div>
+            </div>
+            <div class="stat-tile stat-tile-model">
+                <div class="stat-tile-label">Cải tiến dẫn trước</div>
+                <div class="stat-tile-value"><?= number_format($improvedWins) ?></div>
+                <div class="stat-tile-sub"><?= $pairCount > 0 ? e(number_format($leadRate, 1)) . '% số cặp có điểm cao hơn mô hình gốc.' : 'Chưa có dữ liệu để tính tỷ lệ.' ?></div>
+            </div>
+            <div class="stat-tile <?= $averageDelta >= 0 ? 'stat-tile-drug' : 'stat-tile-disease' ?>">
+                <div class="stat-tile-label">Delta trung bình</div>
+                <div class="stat-tile-value"><?= e(format_score($averageDelta)) ?></div>
+                <div class="stat-tile-sub"><?= $averageDelta >= 0 ? 'Giá trị dương cho thấy xu hướng cải thiện tổng thể.' : 'Giá trị âm cho thấy mô hình gốc đang nhỉnh hơn trong lần chạy này.' ?></div>
+            </div>
+            <div class="stat-tile stat-tile-drug">
+                <div class="stat-tile-label">Điểm cải tiến cao nhất</div>
+                <div class="stat-tile-value"><?= e(format_score($topImprovedRow['improved_score'] ?? 0)) ?></div>
+                <div class="stat-tile-sub"><?= e($topImprovedPair) ?></div>
             </div>
         </div>
 
-        <form method="post" onsubmit="document.getElementById('loader').style.display='grid'">
-            <div class="search-grid">
-                <div class="form-group">
-                    <label class="label">Bo du lieu</label>
-                    <select class="select" name="dataset">
-                        <option value="C-dataset" <?= $dataset === 'C-dataset' ? 'selected' : '' ?>>Dataset C</option>
-                        <option value="B-dataset" <?= $dataset === 'B-dataset' ? 'selected' : '' ?>>Dataset B</option>
-                        <option value="F-dataset" <?= $dataset === 'F-dataset' ? 'selected' : '' ?>>Dataset F</option>
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label class="label">Tu khoa</label>
-                    <input class="input" type="text" name="input_text" value="<?= e($inputText) ?>" placeholder="Goserelin, DB00014, D102100..." required>
-                </div>
-
-                <div class="form-group">
-                    <label class="label label-center">Loai truy van</label>
-                    <div class="query-toggle-container">
-                        <input type="checkbox" id="query_toggle" class="toggle-input" name="query_type_toggle" <?= $queryType === 'disease_to_drug' ? 'checked' : '' ?> onchange="this.nextElementSibling.nextElementSibling.value = this.checked ? 'disease_to_drug' : 'drug_to_disease'">
-                        <label for="query_toggle" class="toggle-label" title="Thuoc / Benh">
-                            <div class="toggle-slider"></div>
-                            <div class="toggle-text"><span class="text-top">Thuoc</span><span class="text-bottom">Benh</span></div>
-                        </label>
-                        <input type="hidden" name="query_type" value="<?= e($queryType) ?>">
+        <div class="grid grid-2-equal">
+            <div class="glass-card">
+                <div class="section-header">
+                    <div>
+                        <h3>Mô hình gốc</h3>
+                        <p class="muted mono"><?= e((string) ($resultData['models']['original']['checkpoint'] ?? '')) ?></p>
                     </div>
+                    <span class="badge badge-drug"><?= count($comparisonRows) ?> cặp</span>
                 </div>
-
-                <div class="form-group">
-                    <label class="label">Lay Top-K</label>
-                    <div class="toolbar-inline">
-                        <input class="input input-top-k" type="number" name="top_k" min="1" max="20" value="<?= e((string) $topK) ?>">
-                        <button class="btn" type="submit" <?= !$apiHealthy ? 'disabled' : '' ?>>Du doan</button>
-                    </div>
-                </div>
-            </div>
-        </form>
-    </div>
-
-    <div class="grid grid-2">
-        <div class="glass-card">
-            <div class="section-header">
-                <div>
-                    <h3>Ket qua phan tich HGT</h3>
-                    <p class="muted">Danh sach ket qua co xac suat du doan cao nhat.</p>
-                </div>
-                <div class="badge badge-drug"><?= $topK ?> results</div>
-            </div>
-
-            <?php if ($resultData): ?>
                 <div class="table-container">
                     <table class="table">
-                        <thead>
-                        <tr>
-                            <th>Hang</th>
-                            <th>Thuc the tiem nang</th>
-                            <th>Loai</th>
-                            <th>Xac suat</th>
-                        </tr>
-                        </thead>
+                        <thead><tr><th>Thuốc</th><th>Bệnh</th><th>Điểm</th></tr></thead>
                         <tbody>
-                        <?php foreach (($resultData['results'] ?? []) as $index => $item): ?>
+                        <?php foreach (($resultData['models']['original']['results'] ?? []) as $row): ?>
                             <tr>
-                                <td class="muted">#<?= $index + 1 ?></td>
-                                <td>
-                                    <div class="result-title"><?= e((string) $item['name']) ?></div>
-                                    <div class="muted mono">ID: <?= e((string) $item['id']) ?></div>
-                                </td>
-                                <td><span class="badge <?= ($item['type'] ?? '') === 'drug' ? 'badge-drug' : 'badge-disease' ?>"><?= e((string) $item['type']) ?></span></td>
-                                <td class="score-text"><?= e(number_format((float) $item['score'], 4)) ?></td>
+                                <td><strong><?= e((string) $row['drug_name']) ?></strong><br><span class="muted mono"><?= e((string) $row['drug_id']) ?></span></td>
+                                <td><strong><?= e((string) $row['disease_name']) ?></strong><br><span class="muted mono"><?= e((string) $row['disease_id']) ?></span></td>
+                                <td class="score-text"><?= e(format_score($row['score'] ?? 0)) ?></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
                     </table>
                 </div>
-            <?php else: ?>
-                <div class="center-empty">
-                    <div class="empty-icon">+</div>
-                    <p>Nhap tu khoa va nhan Du doan de bat dau phan tich.</p>
-                </div>
-            <?php endif; ?>
-        </div>
-
-        <div class="glass-card">
-            <div class="section-header">
-                <div>
-                    <h3>Lich su gan day</h3>
-                    <p class="muted">8 luot tra cuu gan nhat cua tai khoan hien tai.</p>
-                </div>
             </div>
 
+            <div class="glass-card">
+                <div class="section-header">
+                    <div>
+                        <h3>Mô hình cải tiến</h3>
+                        <p class="muted mono"><?= e((string) ($resultData['models']['improved']['checkpoint'] ?? '')) ?></p>
+                    </div>
+                    <span class="badge badge-success">Improved</span>
+                </div>
+                <div class="table-container">
+                    <table class="table">
+                        <thead><tr><th>Thuốc</th><th>Bệnh</th><th>Điểm</th></tr></thead>
+                        <tbody>
+                        <?php foreach (($resultData['models']['improved']['results'] ?? []) as $row): ?>
+                            <tr>
+                                <td><strong><?= e((string) $row['drug_name']) ?></strong><br><span class="muted mono"><?= e((string) $row['drug_id']) ?></span></td>
+                                <td><strong><?= e((string) $row['disease_name']) ?></strong><br><span class="muted mono"><?= e((string) $row['disease_id']) ?></span></td>
+                                <td class="score-text"><?= e(format_score($row['score'] ?? 0)) ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="glass-card section-spaced">
+            <div class="section-header">
+                <div>
+                    <h3>Bảng so sánh delta</h3>
+                    <p class="muted">Delta = Điểm cải tiến − Điểm gốc. Mô hình thắng được tô đậm.</p>
+                </div>
+                <span class="badge badge-drug"><?= count($comparisonRows) ?> cặp</span>
+            </div>
             <div class="table-container">
                 <table class="table">
                     <thead>
                     <tr>
-                        <th>Input</th>
-                        <th class="align-right">Ket qua</th>
+                        <th>Thuốc</th>
+                        <th>Bệnh</th>
+                        <th>Gốc</th>
+                        <th>Cải tiến</th>
+                        <th>Delta</th>
+                        <th>Mô hình thắng</th>
                     </tr>
                     </thead>
                     <tbody>
-                    <?php if (empty($histories)): ?>
-                        <tr><td colspan="2" class="center-empty">Chua co du lieu</td></tr>
-                    <?php endif; ?>
-                    <?php foreach ($histories as $item): ?>
+                    <?php foreach ($comparisonRows as $row): ?>
                         <tr>
+                            <td><strong><?= e((string) $row['drug_name']) ?></strong><br><span class="muted mono"><?= e((string) $row['drug_id']) ?></span></td>
+                            <td><strong><?= e((string) $row['disease_name']) ?></strong><br><span class="muted mono"><?= e((string) $row['disease_id']) ?></span></td>
+                            <td class="score-text"><?= e(format_score($row['original_score'] ?? 0)) ?></td>
+                            <td class="score-text"><?= e(format_score($row['improved_score'] ?? 0)) ?></td>
+                            <td class="<?= ((float) ($row['delta'] ?? 0)) >= 0 ? 'delta-positive' : 'delta-negative' ?>"><?= e(format_score($row['delta'] ?? 0)) ?></td>
                             <td>
-                                <span class="muted"><?= e((string) $item['query_type']) ?></span><br>
-                                <strong><?= e((string) $item['input_text']) ?></strong>
+                                <?php
+                                $winner = (string) ($row['winner'] ?? 'tie');
+                                $winnerLabel = $winner === 'improved' ? 'Cải tiến' : ($winner === 'original' ? 'Gốc' : 'Hòa');
+                                $winnerClass = $winner === 'improved' ? 'badge-success' : 'badge-neutral';
+                                ?>
+                                <span class="badge <?= e($winnerClass) ?>"><?= e($winnerLabel) ?></span>
                             </td>
-                            <td class="align-right"><span class="badge badge-neutral">Top-<?= e((string) $item['top_k']) ?></span></td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
                 </table>
             </div>
         </div>
-    </div>
 
-    <div class="glass-card section-spaced">
-        <div class="section-header">
-            <div>
-                <h3>So do mang lien ket truc quan</h3>
-                <p class="muted">Do thi duoc trinh bay theo 3 nhom mau ro rang: thuoc, benh va protein cau noi.</p>
+        <div class="grid grid-2-equal section-spaced compare-visual-grid">
+            <div class="glass-card">
+                <div class="section-header">
+                    <div>
+                        <h3>Biểu đồ cột so sánh</h3>
+                        <p class="muted">Hiển thị tối đa 10 cặp theo điểm của mô hình cải tiến.</p>
+                    </div>
+                </div>
+                <div class="chart-panel">
+                    <canvas id="comparisonChart"></canvas>
+                    <div id="chartFallback" class="chart-fallback">Không tải được Chart.js. Vui lòng kiểm tra kết nối mạng hoặc tham khảo bảng so sánh phía trên.</div>
+                </div>
             </div>
-            <div class="graph-legend">
-                <div class="legend-item">
-                    <span class="legend-dot legend-dot-drug"></span>
-                    <span>Thuoc</span>
+            <div class="glass-card">
+                <div class="section-header">
+                    <div>
+                        <h3>Sơ đồ liên kết 2D</h3>
+                        <p class="muted">Cột trái: thuốc · cột phải: bệnh · cạnh: kết quả của mô hình cải tiến.</p>
+                    </div>
                 </div>
-                <div class="legend-item">
-                    <span class="legend-dot legend-dot-disease"></span>
-                    <span>Benh</span>
+                <?= render_compare_graph($resultData['graph2d'] ?? []) ?>
+            </div>
+        </div>
+    <?php else: ?>
+        <div class="glass-card section-spaced" id="quick-start">
+            <div class="section-header">
+                <div>
+                    <h3>Sẵn sàng cho phiên chẩn đoán đầu tiên</h3>
+                    <p class="muted">Quy trình gọn để thao tác nhanh và trình bày rõ ràng trong demo.</p>
                 </div>
-                <div class="legend-item">
-                    <span class="legend-dot legend-dot-protein"></span>
-                    <span>Protein</span>
+            </div>
+            <div class="quick-start-grid">
+                <div class="quick-start-card">
+                    <span class="step-pill">Bước 1</span>
+                    <h4>Chọn bộ dữ liệu</h4>
+                    <p>Bắt đầu với C-dataset nếu bạn cần bộ dữ liệu cân bằng và quen thuộc cho demo.</p>
+                </div>
+                <div class="quick-start-card">
+                    <span class="step-pill">Bước 2</span>
+                    <h4>Chọn thuốc và bệnh</h4>
+                    <p>Dùng bộ lọc tìm kiếm để chọn ít nhất 1 thuốc và 1 bệnh, tối đa 5 + 5 cho mỗi lần chạy.</p>
+                </div>
+                <div class="quick-start-card">
+                    <span class="step-pill">Bước 3</span>
+                    <h4>Đọc kết quả theo từng lớp</h4>
+                    <p>Xem bảng điểm, delta và hai biểu đồ để kể câu chuyện kết quả một cách mạch lạc.</p>
                 </div>
             </div>
         </div>
-
-        <div class="graph-insights">
-            <div class="graph-insight">
-                <span class="legend-dot legend-dot-drug"></span>
-                <div>
-                    <strong><?= $graphStats['drug'] ?> nut thuoc</strong>
-                    <p>Thuoc duoc ve theo kieu khoi cau lien ket, giu mau xanh duong de nhin ra nhanh vai tro cua nut trung tam hoac ung vien.</p>
-                </div>
-            </div>
-            <div class="graph-insight">
-                <span class="legend-dot legend-dot-disease"></span>
-                <div>
-                    <strong><?= $graphStats['disease'] ?> nut benh</strong>
-                    <p>Benh dung mau hong do va duoc dat o lop ngoai, giup so do giong cach trinh bay phan tu nhung van de tach nhom.</p>
-                </div>
-            </div>
-            <div class="graph-insight">
-                <span class="legend-dot legend-dot-protein"></span>
-                <div>
-                    <strong><?= $graphStats['protein'] ?> nut protein</strong>
-                    <p>Protein la lop lien ket o giua, dong vai tro nhu cau noi trong so do dang ball-and-stick de nhin luong lien quan ro hon.</p>
-                </div>
-            </div>
+    <?php endif; ?>
         </div>
-
-        <?php if (empty($graph['nodes'])): ?>
-            <div class="empty-panel">Chua co du lieu do thi. Vui long thuc hien du doan.</div>
-        <?php else: ?>
-            <div class="graph-note">
-                So do duoc chuan hoa theo phong cach lien ket hoa hoc: nut truy van goc nam o tam, protein tao vong lien ket trung gian va cac ket qua nam o lop ngoai.
-            </div>
-            <div id="graph3d"></div>
-        <?php endif; ?>
     </div>
 </div>
 
-<script>
-const graphData = <?= json_encode($graph, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
-const apiNote = <?= json_encode($resultData['note'] ?? '', JSON_UNESCAPED_UNICODE) ?>;
-const phpSuccess = <?= json_encode($success ?? '', JSON_UNESCAPED_UNICODE) ?>;
-
-function showToast(message) {
-    const container = document.getElementById('toast-container');
-    const toast = document.createElement('div');
-    const isWarn = message.toLowerCase().includes('canh bao');
-    const isSuccess = message.toLowerCase().includes('thanh cong');
-    toast.className = `toast ${isWarn ? 'toast-warn' : ''} ${isSuccess ? 'toast-success' : ''}`;
-    toast.innerHTML = `<div class="toast-icon">${isWarn ? '!' : (isSuccess ? '+' : 'i')}</div><div class="toast-message">${message}</div>`;
-    container.appendChild(toast);
-    setTimeout(() => toast.classList.add('show'), 100);
-    setTimeout(() => {
-        toast.classList.remove('show');
-        setTimeout(() => toast.remove(), 400);
-    }, 5000);
-}
-
-if (apiNote) showToast(apiNote);
-if (phpSuccess) showToast(phpSuccess);
-
-const container = document.getElementById('graph3d');
-if (container && graphData && Array.isArray(graphData.nodes) && graphData.nodes.length > 0) {
-    const TYPE_CONFIG = {
-        drug: { label: 'Thuoc', color: '#2563eb', glow: 'rgba(37, 99, 235, 0.18)', size: 16 },
-        disease: { label: 'Benh', color: '#e85d75', glow: 'rgba(232, 93, 117, 0.18)', size: 16 },
-        protein: { label: 'Protein', color: '#14b8a6', glow: 'rgba(20, 184, 166, 0.18)', size: 13 },
-        default: { label: 'Node', color: '#64748b', glow: 'rgba(100, 116, 139, 0.16)', size: 12 }
-    };
-
-    const normalizeType = (type) => {
-        const value = String(type || '').toLowerCase();
-        return TYPE_CONFIG[value] ? value : 'default';
-    };
-
-    const truncateLabel = (value, limit = 24) => {
-        if (!value) return 'Unknown';
-        return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
-    };
-
-    const buildLayoutGraph = (rawGraph) => {
-        const nodes = (rawGraph.nodes || []).map((node, index) => ({
-            ...node,
-            type: normalizeType(node.type),
-            label: node.label || node.name || node.actual_id || node.id,
-            isSource: index === 0
-        }));
-        const links = (rawGraph.links || []).map((link) => ({ ...link }));
-
-        const sourceType = nodes[0]?.type || 'drug';
-        const targetNode = nodes.find((node, index) => index > 0 && node.type !== 'protein' && node.type !== sourceType);
-        const targetType = targetNode?.type || (sourceType === 'drug' ? 'disease' : 'drug');
-        const columns = { [sourceType]: -320, protein: 0, [targetType]: 320 };
-
-        ['drug', 'protein', 'disease', 'default'].forEach((type, fallbackIndex) => {
-            if (!Object.prototype.hasOwnProperty.call(columns, type)) {
-                columns[type] = (-320 + fallbackIndex * 210);
+<?php if ($resultData): ?>
+    <script>
+    const chartLabels = <?= json_encode($chartLabels, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+    const originalScores = <?= json_encode($chartOriginal, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+    const improvedScores = <?= json_encode($chartImproved, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+    const deltas = <?= json_encode($chartDelta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+    const chartElement = document.getElementById('comparisonChart');
+    if (chartElement && window.Chart) {
+        new Chart(chartElement, {
+            type: 'bar',
+            data: {
+                labels: chartLabels,
+                datasets: [
+                    { label: 'Mô hình gốc', data: originalScores, backgroundColor: 'rgba(148, 163, 184, 0.55)', borderColor: 'rgba(226, 232, 240, 0.55)', borderWidth: 1, borderRadius: 8 },
+                    { label: 'Mô hình cải tiến', data: improvedScores, backgroundColor: 'rgba(99, 102, 241, 0.78)', borderColor: 'rgba(168, 85, 247, 0.72)', borderWidth: 1, borderRadius: 8 }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            color: '#d8deea',
+                            usePointStyle: true,
+                            boxWidth: 10,
+                            boxHeight: 10,
+                            padding: 18
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(10, 12, 18, 0.92)',
+                        titleColor: '#f8fafc',
+                        bodyColor: '#d8deea',
+                        borderColor: 'rgba(255, 255, 255, 0.08)',
+                        borderWidth: 1,
+                        callbacks: {
+                            afterBody: (items) => {
+                                const index = items[0]?.dataIndex ?? 0;
+                                return `Delta: ${Number(deltas[index] || 0).toFixed(4)}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 1,
+                        ticks: { color: '#aeb7c8' },
+                        grid: { color: 'rgba(255, 255, 255, 0.08)' }
+                    },
+                    x: {
+                        ticks: { color: '#aeb7c8', maxRotation: 45, minRotation: 0 },
+                        grid: { color: 'rgba(255, 255, 255, 0.04)' }
+                    }
+                }
             }
         });
-
-        const groupedNodes = { drug: [], disease: [], protein: [], default: [] };
-        nodes.forEach((node) => {
-            groupedNodes[node.type] = groupedNodes[node.type] || [];
-            groupedNodes[node.type].push(node);
-        });
-
-        const applyColumn = (list, type) => {
-            const total = list.length;
-            if (!total) {
-                return;
-            }
-            const spacing = total === 1 ? 0 : Math.min(140, 520 / Math.max(total - 1, 1));
-            const start = -((total - 1) * spacing) / 2;
-
-            list.forEach((node, index) => {
-                const config = TYPE_CONFIG[node.type] || TYPE_CONFIG.default;
-                node.fx = columns[type] ?? 0;
-                node.fy = start + index * spacing;
-                node.val = config.size + (node.isSource ? 6 : 0);
-            });
-        };
-
-        applyColumn(groupedNodes[sourceType] || [], sourceType);
-        applyColumn(groupedNodes.protein || [], 'protein');
-        applyColumn(groupedNodes[targetType] || [], targetType);
-
-        Object.entries(groupedNodes).forEach(([type, list]) => {
-            if (type !== sourceType && type !== 'protein' && type !== targetType) {
-                applyColumn(list, type);
-            }
-        });
-
-        return { nodes, links };
-    };
-
-    const truncateNodeLabel = (value, limit = 24) => {
-        if (!value) return 'Unknown';
-        return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
-    };
-
-    const drawRoundedRect = (ctx, x, y, width, height, radius) => {
-        ctx.beginPath();
-        ctx.moveTo(x + radius, y);
-        ctx.lineTo(x + width - radius, y);
-        ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
-        ctx.lineTo(x + width, y + height - radius);
-        ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-        ctx.lineTo(x + radius, y + height);
-        ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
-        ctx.lineTo(x, y + radius);
-        ctx.quadraticCurveTo(x, y, x + radius, y);
-        ctx.closePath();
-    };
-
-    const preparedGraph = buildLayoutGraph(graphData);
-    const Graph = ForceGraph()(container)
-        .graphData(preparedGraph)
-        .nodeId('id')
-        .backgroundColor('rgba(255,255,255,0)')
-        .nodeLabel((node) => `${node.label} (${TYPE_CONFIG[node.type]?.label || 'Node'})`)
-        .linkColor((link) => {
-            const sourceType = normalizeType(link.source?.type || link.source);
-            const targetType = normalizeType(link.target?.type || link.target);
-            if (sourceType === 'protein' || targetType === 'protein') {
-                return 'rgba(20, 184, 166, 0.28)';
-            }
-            return 'rgba(100, 116, 139, 0.26)';
-        })
-        .linkWidth((link) => {
-            const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
-            const targetId = typeof link.target === 'object' ? link.target.id : link.target;
-            return sourceId === preparedGraph.nodes[0]?.id || targetId === preparedGraph.nodes[0]?.id ? 2.4 : 1.6;
-        })
-        .linkDirectionalParticles(2)
-        .linkDirectionalParticleWidth(1.8)
-        .linkDirectionalParticleColor((link) => {
-            const sourceType = normalizeType(link.source?.type || link.source);
-            return TYPE_CONFIG[sourceType]?.color || TYPE_CONFIG.default.color;
-        })
-        .enableNodeDrag(false)
-        .cooldownTicks(0)
-        .nodeCanvasObject((node, ctx, globalScale) => {
-            const config = TYPE_CONFIG[node.type] || TYPE_CONFIG.default;
-            const radius = node.val || config.size;
-            const fontSize = Math.max(12 / globalScale, 11);
-            const label = truncateNodeLabel(node.label, node.isSource ? 28 : 22);
-            ctx.font = `700 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
-            const pillWidth = ctx.measureText(label).width + fontSize * 1.6;
-            const pillHeight = fontSize * 1.8;
-            const pillX = node.x - (pillWidth / 2);
-            const pillY = node.y + radius + 10;
-
-            ctx.beginPath();
-            ctx.arc(node.x, node.y, radius + 8, 0, 2 * Math.PI, false);
-            ctx.fillStyle = config.glow;
-            ctx.fill();
-
-            ctx.beginPath();
-            ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
-            ctx.fillStyle = config.color;
-            ctx.fill();
-            ctx.lineWidth = 3;
-            ctx.strokeStyle = '#ffffff';
-            ctx.stroke();
-
-            drawRoundedRect(ctx, pillX, pillY, pillWidth, pillHeight, pillHeight / 2);
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
-            ctx.fill();
-            ctx.lineWidth = 1;
-            ctx.strokeStyle = 'rgba(126, 108, 79, 0.14)';
-            ctx.stroke();
-
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#1d2433';
-            ctx.fillText(label, node.x, pillY + (pillHeight / 2));
-
-            if (node.isSource) {
-                ctx.font = `800 ${Math.max(10 / globalScale, 9)}px "Plus Jakarta Sans", sans-serif`;
-                ctx.fillStyle = config.color;
-                ctx.fillText('TRUY VAN GOC', node.x, node.y - radius - 14);
-            }
-        });
-
-    Graph.zoom(1.08, 0);
-    Graph.centerAt(0, 0, 0);
-
-    const clampChannel = (value) => Math.max(0, Math.min(255, value));
-    const shadeHex = (hex, amount) => {
-        const safeHex = String(hex || '#64748b').replace('#', '');
-        const num = Number.parseInt(safeHex, 16);
-        const red = clampChannel(((num >> 16) & 255) + amount);
-        const green = clampChannel(((num >> 8) & 255) + amount);
-        const blue = clampChannel((num & 255) + amount);
-        return `rgb(${red}, ${green}, ${blue})`;
-    };
-
-    const placeRingNodes = (nodes, radius, startAngle = -Math.PI / 2) => {
-        if (!nodes.length) {
-            return;
+    } else {
+        const fallback = document.getElementById('chartFallback');
+        if (fallback) {
+            fallback.style.display = 'grid';
         }
-        const step = (Math.PI * 2) / Math.max(nodes.length, 1);
-        nodes.forEach((node, index) => {
-            const angle = startAngle + (index * step);
-            node.fx = Math.cos(angle) * radius;
-            node.fy = Math.sin(angle) * radius;
-        });
-    };
+    }
+    </script>
+<?php endif; ?>
 
-    const buildChemicalLayoutGraph = (rawGraph) => {
-        const nodes = (rawGraph.nodes || []).map((node, index) => ({
-            ...node,
-            type: normalizeType(node.type),
-            label: node.label || node.name || node.actual_id || node.id,
-            isSource: index === 0
-        }));
-        const links = (rawGraph.links || []).map((link) => ({ ...link }));
-        const sourceNode = nodes[0] || null;
-        const proteinNodes = nodes.filter((node) => !node.isSource && node.type === 'protein');
-        const outerNodes = nodes.filter((node) => !node.isSource && node.type !== 'protein');
-
-        if (sourceNode) {
-            sourceNode.fx = 0;
-            sourceNode.fy = 0;
-            sourceNode.val = 48;
-        }
-
-        placeRingNodes(proteinNodes, proteinNodes.length <= 3 ? 118 : 142);
-        placeRingNodes(outerNodes, outerNodes.length <= 4 ? 238 : 282, -Math.PI / 3);
-
-        proteinNodes.forEach((node) => { node.val = 28; });
-        outerNodes.forEach((node) => { node.val = 38; });
-
-        return { nodes, links };
-    };
-
-    container.innerHTML = '';
-    const chemicalGraphData = buildChemicalLayoutGraph(graphData);
-    const ChemicalGraph = ForceGraph()(container)
-        .graphData(chemicalGraphData)
-        .nodeId('id')
-        .backgroundColor('rgba(255,255,255,0)')
-        .nodeLabel((node) => `${node.label} (${TYPE_CONFIG[node.type]?.label || 'Node'})`)
-        .linkColor((link) => {
-            const sourceType = normalizeType(link.source?.type || link.source);
-            const targetType = normalizeType(link.target?.type || link.target);
-            if (sourceType === 'protein' || targetType === 'protein') {
-                return 'rgba(20, 184, 166, 0.55)';
-            }
-            return 'rgba(126, 108, 79, 0.42)';
-        })
-        .linkWidth((link) => {
-            const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
-            const targetId = typeof link.target === 'object' ? link.target.id : link.target;
-            return sourceId === chemicalGraphData.nodes[0]?.id || targetId === chemicalGraphData.nodes[0]?.id ? 5.2 : 3.4;
-        })
-        .enableNodeDrag(false)
-        .cooldownTicks(0)
-        .nodeCanvasObject((node, ctx, globalScale) => {
-            const config = TYPE_CONFIG[node.type] || TYPE_CONFIG.default;
-            const radius = node.val || 30;
-            const label = truncateNodeLabel(node.label, node.isSource ? 28 : 18);
-            const titleFontSize = Math.max((node.isSource ? 18 : 14) / globalScale, 11);
-            const subFontSize = Math.max(10 / globalScale, 8);
-            const gradient = ctx.createRadialGradient(
-                node.x - radius * 0.42,
-                node.y - radius * 0.48,
-                radius * 0.15,
-                node.x,
-                node.y,
-                radius * 1.05
-            );
-
-            gradient.addColorStop(0, shadeHex(config.color, 95));
-            gradient.addColorStop(0.35, shadeHex(config.color, 25));
-            gradient.addColorStop(1, shadeHex(config.color, -42));
-
-            ctx.save();
-            ctx.shadowColor = config.glow;
-            ctx.shadowBlur = radius * 1.1;
-            ctx.beginPath();
-            ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
-            ctx.fillStyle = gradient;
-            ctx.fill();
-            ctx.lineWidth = 2.5;
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.88)';
-            ctx.stroke();
-            ctx.restore();
-
-            ctx.beginPath();
-            ctx.arc(node.x - radius * 0.32, node.y - radius * 0.36, radius * 0.24, 0, 2 * Math.PI, false);
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.34)';
-            ctx.fill();
-
-            ctx.font = `800 ${titleFontSize}px "Plus Jakarta Sans", sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#141b28';
-            ctx.fillText(label, node.x, node.y - radius - (node.isSource ? 26 : 18));
-
-            ctx.font = `700 ${subFontSize}px "Plus Jakarta Sans", sans-serif`;
-            ctx.fillStyle = node.isSource ? config.color : '#6b7280';
-            ctx.fillText(node.isSource ? 'TRUY VAN GOC' : (TYPE_CONFIG[node.type]?.label || 'Node'), node.x, node.y + radius + 14);
-        });
-
-    ChemicalGraph.zoom(1.02, 0);
-    ChemicalGraph.centerAt(0, 0, 0);
-}
-</script>
 <script>
 (() => {
-    const host = document.getElementById('graph3d');
-    if (!host || !graphData || !Array.isArray(graphData.nodes) || graphData.nodes.length === 0) {
-        return;
+    const API = <?= json_encode(rtrim((string) config('python_api.base_url'), '/'), JSON_UNESCAPED_SLASHES) ?>;
+    const MAX = 5;
+    const preselDrugs = <?= json_encode(parse_compare_entities($drugInput), JSON_UNESCAPED_UNICODE) ?>;
+    const preselDiseases = <?= json_encode(parse_compare_entities($diseaseInput), JSON_UNESCAPED_UNICODE) ?>;
+
+    const state = {
+        drug: { all: [], selected: new Set(), el: { tags: 'drug-tags', list: 'drug-list', search: 'drug-search', hidden: 'drugs-hidden' } },
+        disease: { all: [], selected: new Set(), el: { tags: 'disease-tags', list: 'disease-list', search: 'disease-search', hidden: 'diseases-hidden' } }
+    };
+
+    function esc(t) { const d = document.createElement('span'); d.textContent = t; return d.innerHTML; }
+
+    function render(type) {
+        const s = state[type];
+        const q = document.getElementById(s.el.search).value.toLowerCase();
+        const listEl = document.getElementById(s.el.list);
+        const filtered = s.all.filter(i => !q || `${i.id} ${i.name}`.toLowerCase().includes(q));
+
+        if (!s.all.length) { listEl.innerHTML = '<div class="entity-picker-msg">Chưa có dữ liệu</div>'; renderTags(type); return; }
+        if (!filtered.length) { listEl.innerHTML = '<div class="entity-picker-msg">Không tìm thấy</div>'; renderTags(type); return; }
+
+        listEl.innerHTML = filtered.map(i => {
+            const sel = s.selected.has(i.id);
+            const dis = !sel && s.selected.size >= MAX;
+            return `<div class="entity-picker-item${sel ? ' ep-selected' : ''}${dis ? ' ep-disabled' : ''}" data-id="${esc(i.id)}">` +
+                `<input type="checkbox"${sel ? ' checked' : ''}${dis ? ' disabled' : ''}>` +
+                `<span class="entity-picker-item-name">${esc(i.name)}</span>` +
+                `<span class="entity-picker-id">${esc(i.id)}</span></div>`;
+        }).join('') + `<div class="entity-picker-count">Đã chọn ${s.selected.size}/${MAX}</div>`;
+
+        listEl.querySelectorAll('.entity-picker-item').forEach(el => {
+            el.addEventListener('click', () => {
+                const id = el.dataset.id;
+                if (s.selected.has(id)) { s.selected.delete(id); }
+                else if (s.selected.size < MAX) { s.selected.add(id); }
+                else { return; }
+                sync(type); render(type);
+            });
+        });
+        renderTags(type);
     }
 
-    const TYPE_CONFIG = {
-        drug: { label: 'Thuoc', color: '#2563eb', glow: 'rgba(37, 99, 235, 0.20)', size: 38 },
-        disease: { label: 'Benh', color: '#e85d75', glow: 'rgba(232, 93, 117, 0.20)', size: 38 },
-        protein: { label: 'Protein', color: '#14b8a6', glow: 'rgba(20, 184, 166, 0.18)', size: 28 },
-        default: { label: 'Node', color: '#64748b', glow: 'rgba(100, 116, 139, 0.16)', size: 24 }
-    };
+    function renderTags(type) {
+        const s = state[type];
+        const cls = type === 'drug' ? 'entity-tag-drug' : 'entity-tag-disease';
+        const el = document.getElementById(s.el.tags);
+        el.innerHTML = Array.from(s.selected).map(id => {
+            const item = s.all.find(i => i.id === id);
+            return `<span class="entity-tag ${cls}" data-id="${esc(id)}">${esc(item ? item.name : id)} <span class="entity-tag-remove">×</span></span>`;
+        }).join('');
+        el.querySelectorAll('.entity-tag').forEach(tag => {
+            tag.addEventListener('click', () => { s.selected.delete(tag.dataset.id); sync(type); render(type); });
+        });
+    }
 
-    const normalizeType = (type) => {
-        const value = String(type || '').toLowerCase();
-        return TYPE_CONFIG[value] ? value : 'default';
-    };
+    function sync(type) {
+        document.getElementById(state[type].el.hidden).value = Array.from(state[type].selected).join(',');
+    }
 
-    const truncateLabel = (value, limit = 24) => {
-        if (!value) return 'Unknown';
-        return value.length > limit ? `${value.slice(0, Math.max(limit - 3, 1))}...` : value;
-    };
-
-    const clampChannel = (value) => Math.max(0, Math.min(255, value));
-    const shadeHex = (hex, amount) => {
-        const safeHex = String(hex || '#64748b').replace('#', '');
-        const num = Number.parseInt(safeHex, 16);
-        const red = clampChannel(((num >> 16) & 255) + amount);
-        const green = clampChannel(((num >> 8) & 255) + amount);
-        const blue = clampChannel((num & 255) + amount);
-        return `rgb(${red}, ${green}, ${blue})`;
-    };
-
-    const placeRingNodes = (nodes, radius, startAngle = -Math.PI / 2) => {
-        if (!nodes.length) {
-            return;
+    async function load(dataset) {
+        for (const type of ['drug', 'disease']) {
+            document.getElementById(state[type].el.list).innerHTML = '<div class="entity-picker-msg">Đang tải...</div>';
+            document.getElementById(state[type].el.search).value = '';
         }
-        const step = (Math.PI * 2) / Math.max(nodes.length, 1);
-        nodes.forEach((node, index) => {
-            const angle = startAngle + (index * step);
-            const x = Math.cos(angle) * radius;
-            const y = Math.sin(angle) * radius;
-            node.x = x;
-            node.y = y;
-            node.fx = x;
-            node.fy = y;
+        try {
+            const res = await fetch(`${API}/entities?dataset=${encodeURIComponent(dataset)}`);
+            if (!res.ok) throw new Error();
+            const data = await res.json();
+            state.drug.all = data.drugs || [];
+            state.disease.all = data.diseases || [];
+        } catch { state.drug.all = []; state.disease.all = []; }
+        render('drug'); render('disease');
+    }
+
+    function preselect(type, values) {
+        const s = state[type];
+        values.forEach(v => {
+            const vl = v.toLowerCase();
+            const m = s.all.find(i => i.id.toLowerCase() === vl || i.name.toLowerCase() === vl);
+            if (m && s.selected.size < MAX) s.selected.add(m.id);
         });
-    };
+        sync(type);
+    }
 
-    const layoutGraph = (() => {
-        const nodes = (graphData.nodes || []).map((node, index) => ({
-            ...node,
-            type: normalizeType(node.type),
-            label: node.label || node.name || node.actual_id || node.id,
-            isSource: index === 0
-        }));
-        const links = (graphData.links || []).map((link) => ({ ...link }));
-        const sourceNode = nodes[0] || null;
-        const proteinNodes = nodes.filter((node) => !node.isSource && node.type === 'protein');
-        const outerNodes = nodes.filter((node) => !node.isSource && node.type !== 'protein');
+    const sel = document.getElementById('dataset-select');
+    sel.addEventListener('change', () => { state.drug.selected.clear(); state.disease.selected.clear(); load(sel.value); });
+    document.getElementById('drug-search').addEventListener('input', () => render('drug'));
+    document.getElementById('disease-search').addEventListener('input', () => render('disease'));
 
-        if (sourceNode) {
-            sourceNode.x = 0;
-            sourceNode.y = 0;
-            sourceNode.fx = 0;
-            sourceNode.fy = 0;
-            sourceNode.val = 52;
-        }
-
-        placeRingNodes(proteinNodes, proteinNodes.length <= 3 ? 120 : 148);
-        placeRingNodes(outerNodes, outerNodes.length <= 4 ? 235 : 285, -Math.PI / 3);
-
-        proteinNodes.forEach((node) => { node.val = TYPE_CONFIG.protein.size; });
-        outerNodes.forEach((node) => {
-            const config = TYPE_CONFIG[node.type] || TYPE_CONFIG.default;
-            node.val = config.size;
-        });
-
-        return { nodes, links };
-    })();
-
-    host.innerHTML = '';
-
-    const graph = ForceGraph()(host)
-        .graphData(layoutGraph)
-        .nodeId('id')
-        .backgroundColor('rgba(255,255,255,0)')
-        .nodeLabel((node) => `${node.label} (${TYPE_CONFIG[node.type]?.label || 'Node'})`)
-        .linkColor((link) => {
-            const sourceType = normalizeType(link.source?.type || link.source);
-            const targetType = normalizeType(link.target?.type || link.target);
-            if (sourceType === 'protein' || targetType === 'protein') {
-                return 'rgba(20, 184, 166, 0.55)';
-            }
-            return 'rgba(126, 108, 79, 0.42)';
-        })
-        .linkWidth((link) => {
-            const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
-            const targetId = typeof link.target === 'object' ? link.target.id : link.target;
-            return sourceId === layoutGraph.nodes[0]?.id || targetId === layoutGraph.nodes[0]?.id ? 5.2 : 3.4;
-        })
-        .enableNodeDrag(false)
-        .warmupTicks(1)
-        .cooldownTicks(1)
-        .nodeCanvasObject((node, ctx, globalScale) => {
-            const config = TYPE_CONFIG[node.type] || TYPE_CONFIG.default;
-            const radius = node.val || config.size;
-            const label = truncateLabel(node.label, node.isSource ? 28 : 18);
-            const titleFontSize = Math.max((node.isSource ? 18 : 14) / globalScale, 11);
-            const subFontSize = Math.max(10 / globalScale, 8);
-            const gradient = ctx.createRadialGradient(
-                node.x - radius * 0.42,
-                node.y - radius * 0.48,
-                radius * 0.15,
-                node.x,
-                node.y,
-                radius * 1.05
-            );
-
-            gradient.addColorStop(0, shadeHex(config.color, 95));
-            gradient.addColorStop(0.35, shadeHex(config.color, 25));
-            gradient.addColorStop(1, shadeHex(config.color, -42));
-
-            ctx.save();
-            ctx.shadowColor = config.glow;
-            ctx.shadowBlur = radius * 1.1;
-            ctx.beginPath();
-            ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
-            ctx.fillStyle = gradient;
-            ctx.fill();
-            ctx.lineWidth = 2.5;
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.88)';
-            ctx.stroke();
-            ctx.restore();
-
-            ctx.beginPath();
-            ctx.arc(node.x - radius * 0.32, node.y - radius * 0.36, radius * 0.24, 0, 2 * Math.PI, false);
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.34)';
-            ctx.fill();
-
-            ctx.font = `800 ${titleFontSize}px "Plus Jakarta Sans", sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#141b28';
-            ctx.fillText(label, node.x, node.y - radius - (node.isSource ? 26 : 18));
-
-            ctx.font = `700 ${subFontSize}px "Plus Jakarta Sans", sans-serif`;
-            ctx.fillStyle = node.isSource ? config.color : '#6b7280';
-            ctx.fillText(node.isSource ? 'TRUY VAN GOC' : (TYPE_CONFIG[node.type]?.label || 'Node'), node.x, node.y + radius + 14);
-        })
-        .onEngineStop(() => {
-            graph.centerAt(0, 0, 250);
-            graph.zoom(1.02, 250);
-        });
-
-    graph.centerAt(0, 0, 0);
+    load(sel.value).then(() => {
+        preselect('drug', preselDrugs);
+        preselect('disease', preselDiseases);
+        render('drug'); render('disease');
+    });
 })();
 </script>
 </body>

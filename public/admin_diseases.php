@@ -15,14 +15,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'name' => $name,
             'description' => $description
         ]);
-        flash('success', 'Da them benh ly moi.');
+        flash('success', 'Đã thêm bệnh lý mới.');
     }
 
     if ($action === 'delete') {
         $id = (int) ($_POST['id'] ?? 0);
         $stmt = db()->prepare('DELETE FROM diseases WHERE id = :id');
         $stmt->execute(['id' => $id]);
-        flash('success', 'Da xoa benh ly.');
+        flash('success', 'Đã xoá bệnh lý.');
     }
 
     redirect('admin_diseases.php');
@@ -36,19 +36,19 @@ $rows = db()->query('SELECT * FROM diseases ORDER BY created_at DESC LIMIT 50')-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin - Quan ly benh ly</title>
+    <title>Quản lý bệnh lý · AMNTDDA AI</title>
     <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
 <div class="container">
     <div class="navbar">
         <div>
-            <div class="brand">Quan ly benh ly</div>
-            <div class="muted">Bien soan thuc the benh va mo ta y sinh theo cung mot style quan tri.</div>
+            <div class="brand">Quản lý bệnh lý</div>
+            <div class="muted">Biên soạn thực thể bệnh và mô tả y sinh theo cùng một style quản trị.</div>
         </div>
         <div class="nav-links">
-            <a class="btn btn-ghost" href="admin.php">Quay lai</a>
-            <a class="btn btn-danger" href="logout.php">Dang xuat</a>
+            <a class="btn btn-ghost" href="admin.php">Quay lại</a>
+            <a class="btn btn-danger" href="logout.php">Đăng xuất</a>
         </div>
     </div>
 
@@ -56,24 +56,24 @@ $rows = db()->query('SELECT * FROM diseases ORDER BY created_at DESC LIMIT 50')-
 
     <div class="grid split-panel">
         <div class="glass-card">
-            <h3>Them benh ly moi</h3>
-            <p class="muted spacer-lg">Bo sung ten benh, ma nguon va mo ta de quan tri du lieu benh ly mot cach thong nhat.</p>
+            <h3>Thêm bệnh lý mới</h3>
+            <p class="muted spacer-lg">Bổ sung tên bệnh, mã nguồn và mô tả để quản trị dữ liệu bệnh lý một cách thống nhất.</p>
             <form method="post">
                 <input type="hidden" name="action" value="create">
                 <div class="stack-tight">
                     <div class="form-group">
-                        <label class="label">Ma nguon</label>
-                        <input class="input" name="source_code" placeholder="Vi du: D102100" required>
+                        <label class="label">Mã nguồn</label>
+                        <input class="input" name="source_code" placeholder="Ví dụ: D102100" required>
                     </div>
                     <div class="form-group">
-                        <label class="label">Ten benh ly</label>
-                        <input class="input" name="name" placeholder="Vi du: Lung Cancer" required>
+                        <label class="label">Tên bệnh lý</label>
+                        <input class="input" name="name" placeholder="Ví dụ: Lung Cancer" required>
                     </div>
                     <div class="form-group">
-                        <label class="label">Mo ta benh ly</label>
-                        <textarea class="input" name="description" placeholder="Thong tin trieu chung, mo ta hoac ma phan loai..."></textarea>
+                        <label class="label">Mô tả bệnh lý</label>
+                        <textarea class="input" name="description" placeholder="Thông tin triệu chứng, mô tả hoặc mã phân loại..."></textarea>
                     </div>
-                    <button class="btn btn-full" type="submit">Luu thong tin</button>
+                    <button class="btn btn-full" type="submit">Lưu thông tin</button>
                 </div>
             </form>
         </div>
@@ -81,10 +81,10 @@ $rows = db()->query('SELECT * FROM diseases ORDER BY created_at DESC LIMIT 50')-
         <div class="glass-card">
             <div class="section-header">
                 <div>
-                    <h3>Danh sach benh ly</h3>
-                    <p class="muted">Hien thi toi da 50 ban ghi moi nhat trong co so du lieu.</p>
+                    <h3>Danh sách bệnh lý</h3>
+                    <p class="muted">Hiển thị tối đa 50 bản ghi mới nhất trong cơ sở dữ liệu.</p>
                 </div>
-                <div class="badge badge-disease"><?= count($rows) ?> records</div>
+                <div class="badge badge-disease"><?= count($rows) ?> bản ghi</div>
             </div>
 
             <div class="table-container table-scroll">
@@ -92,14 +92,14 @@ $rows = db()->query('SELECT * FROM diseases ORDER BY created_at DESC LIMIT 50')-
                     <thead>
                     <tr>
                         <th>ID</th>
-                        <th>Ma nguon</th>
-                        <th>Ten benh ly</th>
-                        <th class="align-right">Hanh dong</th>
+                        <th>Mã nguồn</th>
+                        <th>Tên bệnh lý</th>
+                        <th class="align-right">Thao tác</th>
                     </tr>
                     </thead>
                     <tbody>
                     <?php if (empty($rows)): ?>
-                        <tr><td colspan="4" class="center-empty">Chua co du lieu benh ly.</td></tr>
+                        <tr><td colspan="4" class="center-empty">Chưa có dữ liệu bệnh lý.</td></tr>
                     <?php endif; ?>
                     <?php foreach ($rows as $row): ?>
                         <tr>
@@ -107,10 +107,10 @@ $rows = db()->query('SELECT * FROM diseases ORDER BY created_at DESC LIMIT 50')-
                             <td><span class="badge badge-disease"><?= e((string) $row['source_code']) ?></span></td>
                             <td><strong><?= e((string) $row['name']) ?></strong></td>
                             <td class="align-right">
-                                <form method="post" class="inline-form" onsubmit="return confirm('Ban co chac chan muon xoa benh ly nay?');">
+                                <form method="post" class="inline-form" onsubmit="return confirm('Bạn có chắc chắn muốn xoá bệnh lý này?');">
                                     <input type="hidden" name="action" value="delete">
                                     <input type="hidden" name="id" value="<?= e((string) $row['id']) ?>">
-                                    <button class="btn btn-danger btn-sm" type="submit">Xoa</button>
+                                    <button class="btn btn-danger btn-sm" type="submit">Xoá</button>
                                 </form>
                             </td>
                         </tr>

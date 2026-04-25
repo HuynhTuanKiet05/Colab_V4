@@ -22,16 +22,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'score' => $score,
                     'source_note' => $note
                 ]);
-                flash('success', 'Da tao lien ket moi thanh cong.');
+                flash('success', 'Đã tạo liên kết mới thành công.');
             } catch (PDOException $e) {
                 if ($e->getCode() == 23000) {
-                    flash('error', 'Lien ket giua hai thuc the nay da ton tai.');
+                    flash('error', 'Liên kết giữa hai thực thể này đã tồn tại.');
                 } else {
-                    flash('error', 'Loi CSDL: ' . $e->getMessage());
+                    flash('error', 'Lỗi cơ sở dữ liệu: ' . $e->getMessage());
                 }
             }
         } else {
-            flash('error', 'Vui long chon day du Thuoc va Benh.');
+            flash('error', 'Vui lòng chọn đầy đủ thuốc và bệnh.');
         }
     }
 
@@ -39,7 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id = (int) ($_POST['id'] ?? 0);
         $stmt = db()->prepare('DELETE FROM drug_disease_links WHERE id = :id');
         $stmt->execute(['id' => $id]);
-        flash('success', 'Da xoa lien ket.');
+        flash('success', 'Đã xoá liên kết.');
     }
 
     redirect('admin_links.php');
@@ -64,19 +64,19 @@ $links = db()->query('
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin - Quan ly lien ket sinh hoc</title>
+    <title>Quản lý liên kết sinh học · AMNTDDA AI</title>
     <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
 <div class="container">
     <div class="navbar">
         <div>
-            <div class="brand">Quan ly lien ket sinh hoc</div>
-            <div class="muted">Tao, kiem soat va lam sach cac lien ket Thuoc - Benh trong co so du lieu.</div>
+            <div class="brand">Quản lý liên kết sinh học</div>
+            <div class="muted">Tạo, kiểm soát và làm sạch các liên kết Thuốc – Bệnh trong cơ sở dữ liệu.</div>
         </div>
         <div class="nav-links">
-            <a class="btn btn-ghost" href="admin.php">Quay lai</a>
-            <a class="btn btn-danger" href="logout.php">Dang xuat</a>
+            <a class="btn btn-ghost" href="admin.php">Quay lại</a>
+            <a class="btn btn-danger" href="logout.php">Đăng xuất</a>
         </div>
     </div>
 
@@ -85,15 +85,15 @@ $links = db()->query('
 
     <div class="grid split-panel">
         <div class="glass-card">
-            <h3>Tao lien ket Thuoc - Benh</h3>
-            <p class="muted spacer-lg">Xac lap moi quan he de bo sung du lieu huan luyen, doi chieu ground truth va phuc vu kiem chung.</p>
+            <h3>Tạo liên kết Thuốc – Bệnh</h3>
+            <p class="muted spacer-lg">Xác lập mối quan hệ để bổ sung dữ liệu huấn luyện, đối chiếu ground truth và phục vụ kiểm chứng.</p>
             <form method="post">
                 <input type="hidden" name="action" value="create">
                 <div class="stack-tight">
                     <div class="form-group">
-                        <label class="label">Chon Thuoc</label>
+                        <label class="label">Chọn thuốc</label>
                         <select class="select" name="drug_id" required>
-                            <option value="">-- Chon thuoc --</option>
+                            <option value="">-- Chọn thuốc --</option>
                             <?php foreach ($drugs as $d): ?>
                                 <option value="<?= $d['id'] ?>"><?= e($d['name']) ?> (<?= e($d['source_code']) ?>)</option>
                             <?php endforeach; ?>
@@ -101,9 +101,9 @@ $links = db()->query('
                     </div>
 
                     <div class="form-group">
-                        <label class="label">Chon Benh ly</label>
+                        <label class="label">Chọn bệnh lý</label>
                         <select class="select" name="disease_id" required>
-                            <option value="">-- Chon benh --</option>
+                            <option value="">-- Chọn bệnh --</option>
                             <?php foreach ($diseases as $d): ?>
                                 <option value="<?= $d['id'] ?>"><?= e($d['name']) ?> (<?= e($d['source_code']) ?>)</option>
                             <?php endforeach; ?>
@@ -111,26 +111,26 @@ $links = db()->query('
                     </div>
 
                     <div class="form-group">
-                        <label class="label">Loai lien ket</label>
+                        <label class="label">Loại liên kết</label>
                         <select class="select" name="association_type">
-                            <option value="known_positive">Da biet duong tinh</option>
-                            <option value="known_negative">Da biet am tinh</option>
-                            <option value="predicted">Do mo hinh du doan</option>
-                            <option value="validated">Da duoc kiem chung</option>
+                            <option value="known_positive">Đã biết dương tính</option>
+                            <option value="known_negative">Đã biết âm tính</option>
+                            <option value="predicted">Do mô hình dự đoán</option>
+                            <option value="validated">Đã được kiểm chứng</option>
                         </select>
                     </div>
 
                     <div class="form-group">
-                        <label class="label">Do tin cay</label>
+                        <label class="label">Độ tin cậy</label>
                         <input class="input" type="number" step="0.0001" name="score" value="1.0000">
                     </div>
 
                     <div class="form-group">
-                        <label class="label">Ghi chu</label>
-                        <input class="input" name="source_note" placeholder="Vi du: PubMed ID, ClinicalTrials.gov...">
+                        <label class="label">Ghi chú</label>
+                        <input class="input" name="source_note" placeholder="Ví dụ: PubMed ID, ClinicalTrials.gov...">
                     </div>
 
-                    <button class="btn btn-full" type="submit">Xac lap lien ket</button>
+                    <button class="btn btn-full" type="submit">Xác lập liên kết</button>
                 </div>
             </form>
         </div>
@@ -138,26 +138,26 @@ $links = db()->query('
         <div class="glass-card">
             <div class="section-header">
                 <div>
-                    <h3>Danh sach lien ket thuc te</h3>
-                    <p class="muted">Hien thi cac lien ket moi nhat trong co so du lieu.</p>
+                    <h3>Danh sách liên kết thực tế</h3>
+                    <p class="muted">Hiển thị các liên kết mới nhất trong cơ sở dữ liệu.</p>
                 </div>
-                <div class="badge badge-drug"><?= count($links) ?> records</div>
+                <div class="badge badge-drug"><?= count($links) ?> bản ghi</div>
             </div>
 
             <div class="table-container table-scroll">
                 <table class="table">
                     <thead>
                     <tr>
-                        <th>Thuoc</th>
-                        <th>Benh ly</th>
-                        <th>Loai</th>
-                        <th>Score</th>
-                        <th class="align-right">Hanh dong</th>
+                        <th>Thuốc</th>
+                        <th>Bệnh lý</th>
+                        <th>Loại</th>
+                        <th>Điểm</th>
+                        <th class="align-right">Thao tác</th>
                     </tr>
                     </thead>
                     <tbody>
                     <?php if (empty($links)): ?>
-                        <tr><td colspan="5" class="center-empty">Chua co lien ket nao duoc xac lap.</td></tr>
+                        <tr><td colspan="5" class="center-empty">Chưa có liên kết nào được xác lập.</td></tr>
                     <?php endif; ?>
                     <?php foreach ($links as $row): ?>
                         <tr>
@@ -172,10 +172,10 @@ $links = db()->query('
                             <td><span class="badge badge-neutral"><?= e((string) $row['association_type']) ?></span></td>
                             <td class="score-text"><?= e(number_format((float) $row['score'], 4)) ?></td>
                             <td class="align-right">
-                                <form method="post" class="inline-form" onsubmit="return confirm('Xoa lien ket nay?');">
+                                <form method="post" class="inline-form" onsubmit="return confirm('Xoá liên kết này?');">
                                     <input type="hidden" name="action" value="delete">
                                     <input type="hidden" name="id" value="<?= e((string) $row['id']) ?>">
-                                    <button class="btn btn-danger btn-sm" type="submit">Xoa</button>
+                                    <button class="btn btn-danger btn-sm" type="submit">Xoá</button>
                                 </form>
                             </td>
                         </tr>
