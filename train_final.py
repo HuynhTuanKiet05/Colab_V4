@@ -212,17 +212,61 @@ def save_checkpoint(path, model, optimizer, scheduler, fold_idx, epoch, best_met
     torch.save(checkpoint, path)
 
 
+class _SafeStreamHandler(logging.StreamHandler):
+    """StreamHandler that swallows transient stdout/stderr I/O errors.
+
+    On Kaggle/Colab, when the browser tab disconnects or the kernel reattaches,
+    sys.stdout can briefly raise ``OSError: [Errno 5] Input/output error`` or
+    ``BrokenPipeError`` during ``flush``. The default StreamHandler treats those
+    as logging errors and prints noisy tracebacks; in long training loops this
+    spam can also push the kernel into an unhealthy state and Kaggle may kill
+    the process. Silently dropping the affected record keeps the FileHandler
+    (which writes to disk) running and lets training continue uninterrupted.
+    """
+
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except (OSError, ValueError):
+            pass
+
+    def flush(self):
+        try:
+            super().flush()
+        except (OSError, ValueError):
+            pass
+
+
+class _SafeFileHandler(logging.FileHandler):
+    """FileHandler that survives transient disk flush errors on hosted notebooks."""
+
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except (OSError, ValueError):
+            pass
+
+    def flush(self):
+        try:
+            super().flush()
+        except (OSError, ValueError):
+            pass
+
+
 def configure_logging(result_dir):
     log_file = Path(result_dir) / "training_log.txt"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(message)s",
         handlers=[
-            logging.FileHandler(log_file, mode="a", encoding="utf-8"),
-            logging.StreamHandler(),
+            _SafeFileHandler(log_file, mode="a", encoding="utf-8"),
+            _SafeStreamHandler(),
         ],
         force=True,
     )
+    # Belt and suspenders: silence the logging module's own error reporter so a
+    # broken stdout cannot crash the training loop via repeated tracebacks.
+    logging.raiseExceptions = False
     return log_file
 
 
