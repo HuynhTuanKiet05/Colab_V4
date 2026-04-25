@@ -117,6 +117,10 @@ if __name__ == '__main__':
                 best_aupr, best_accuracy, best_precision, best_recall, best_f1, best_mcc = AUPR, accuracy, precision, recall, f1, mcc
                 print('AUC improved at epoch ', best_epoch, ';\tbest_auc:', best_auc)
 
+                os.makedirs(args.result_dir, exist_ok=True)
+                save_path = os.path.join(args.result_dir, f'best_model_fold_{i}.pth')
+                torch.save(model.state_dict(), save_path)
+
         AUCs.append(best_auc)
         AUPRs.append(best_aupr)
 

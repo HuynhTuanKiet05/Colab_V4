@@ -28,8 +28,6 @@ Backend AI chịu trách nhiệm tính toán và chạy mô hình học sâu.
 4.  **Chạy Server Uvicorn**:
     ```powershell
     uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-    chạy trong laragon
-    php -S localhost:8080 -t public
     ```
     > [!IMPORTANT]
     > Giữ cửa sổ Terminal này luôn mở. Server phải chạy ở cổng **8000** để Frontend có thể kết nối.

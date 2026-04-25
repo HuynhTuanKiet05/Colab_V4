@@ -542,7 +542,7 @@ if __name__ == "__main__":
             pos_pairs_fold = filter_positive_pairs(x_train_np, y_train_np)
         else:
             pos_pairs_fold = x_train_np
-        drdipr_graph, _, _ = dgl_heterograph(data, pos_pairs_fold, args)
+        drdipr_graph, _ = dgl_heterograph(data, pos_pairs_fold, args)
         drdipr_graph = drdipr_graph.to(device)
         logging.info(
             f"Fold {fold_idx} drdipr_graph: n_train_pairs={len(x_train_np)} | "

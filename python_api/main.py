@@ -102,10 +102,14 @@ class InferenceManager:
         return data_dir, model_path
 
     def resolve_model_path(self, dataset_name: str) -> Path | None:
-        candidate_roots = [
-            PROJECT_ROOT / 'Result' / 'improved' / dataset_name,
-            PROJECT_ROOT / 'Result' / dataset_name,
-        ]
+        dataset_variants = {dataset_name, dataset_name.replace('-', '_'), dataset_name.replace('_', '-')}
+        candidate_roots = []
+        for variant in dataset_variants:
+            candidate_roots.extend([
+                PROJECT_ROOT / 'Result' / 'improved' / variant,
+                PROJECT_ROOT / 'Result' / variant,
+            ])
+
         candidates: List[Path] = []
         for root in candidate_roots:
             if not root.exists():
@@ -123,19 +127,22 @@ class InferenceManager:
         if model_version not in {'original', 'improved'}:
             raise ValueError(f"Unsupported model version: {model_version}")
 
-        if model_version == 'original':
-            candidate_roots = [
-                PROJECT_ROOT / 'Result' / 'original' / dataset_name,
-                PROJECT_ROOT / 'Result' / dataset_name / 'AMNTDDA',
-                PROJECT_ROOT / 'AMDGT_original' / 'Result' / dataset_name / 'AMNTDDA',
-                PROJECT_ROOT / 'Result' / dataset_name / 'RLGHGT_v2',
-            ]
-        else:
-            candidate_roots = [
-                PROJECT_ROOT / 'Result' / 'improved' / dataset_name,
-                PROJECT_ROOT / 'Result' / dataset_name / 'improved',
-                PROJECT_ROOT / 'Result' / dataset_name / 'AMNTDDA_improved',
-            ]
+        dataset_variants = {dataset_name, dataset_name.replace('-', '_'), dataset_name.replace('_', '-')}
+        candidate_roots = []
+        for variant in dataset_variants:
+            if model_version == 'original':
+                candidate_roots.extend([
+                    PROJECT_ROOT / 'Result' / 'original' / variant,
+                    PROJECT_ROOT / 'Result' / variant / 'AMNTDDA',
+                    PROJECT_ROOT / 'AMDGT_original' / 'Result' / variant / 'AMNTDDA',
+                    PROJECT_ROOT / 'Result' / variant / 'RLGHGT_v2',
+                ])
+            else:
+                candidate_roots.extend([
+                    PROJECT_ROOT / 'Result' / 'improved' / variant,
+                    PROJECT_ROOT / 'Result' / variant / 'improved',
+                    PROJECT_ROOT / 'Result' / variant / 'AMNTDDA_improved',
+                ])
 
         candidates: List[Path] = []
         for root in candidate_roots:
@@ -262,11 +269,13 @@ class InferenceManager:
                 self.hgt_in_dim = cfg['hgt_in_dim']
                 self.hgt_out_dim = cfg['gt_out_dim']
                 self.gt_layer = 2
-                self.gt_head = 2
+                self.gt_head = cfg.get('gt_head', 2) # Cả hai bản đều dùng 2
                 self.gt_out_dim = cfg['gt_out_dim']
-                self.tr_layer = 2
-                self.tr_head = 4
+                # Cả hai bản đều dùng 2 layers transformer
+                self.tr_layer = cfg.get('tr_layer', 2)
+                self.tr_head = cfg.get('tr_head', 4)
                 self.dropout = 0.2
+                self.topo_hidden = cfg.get('topo_hidden', 128)
                 self.assoc_backbone = 'vanilla_hgt'
                 self.fusion_mode = 'mva'
                 self.pair_mode = 'mul_mlp'
