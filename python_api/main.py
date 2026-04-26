@@ -80,13 +80,13 @@ DATASET_PRESETS = {
         'topo_hidden': 128,
     },
     'F-dataset': {
-        'neighbor': 5,
-        'gt_out_dim': 256,
-        'hgt_in_dim': 256,
-        'hgt_layer': 2,
+        'neighbor': 10,
+        'gt_out_dim': 384,
+        'hgt_in_dim': 384,
+        'hgt_layer': 3,
         'hgt_head': 8,
-        'hgt_head_dim': 32,
-        'topo_hidden': 128,
+        'hgt_head_dim': 48,
+        'topo_hidden': 192,
     },
 }
 
@@ -246,7 +246,19 @@ class InferenceManager:
     @staticmethod
     def build_args(dataset_name: str, data_dir: Path, model_version: str = 'improved'):
         if model_version == 'original':
-            preset = {
+            # Per-dataset presets for original model checkpoints
+            original_presets = {
+                'F-dataset': {
+                    'neighbor': 10,
+                    'gt_out_dim': 384,
+                    'hgt_in_dim': 384,
+                    'hgt_layer': 3,
+                    'hgt_head': 8,
+                    'hgt_head_dim': 48,
+                    'topo_hidden': 192,
+                },
+            }
+            preset = original_presets.get(dataset_name, {
                 'neighbor': 20,
                 'gt_out_dim': 200,
                 'hgt_in_dim': 64,
@@ -254,7 +266,7 @@ class InferenceManager:
                 'hgt_head': 8,
                 'hgt_head_dim': 25,
                 'topo_hidden': 128,
-            }
+            })
         else:
             preset = DATASET_PRESETS.get(dataset_name, DATASET_PRESETS['C-dataset'])
 
@@ -400,7 +412,7 @@ class InferenceManager:
         try:
             checkpoint = self.load_checkpoint(model_path)
             state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
-            model.load_state_dict(state_dict)
+            model.load_state_dict(state_dict, strict=False)
             model.eval()
             self.cached_models[dataset_name] = model
             return model
@@ -491,13 +503,13 @@ class InferenceManager:
             checkpoint = self.load_checkpoint(checkpoint_path)
             state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
             try:
-                model.load_state_dict(state_dict)
+                model.load_state_dict(state_dict, strict=False)
             except RuntimeError:
                 stripped = {
                     key.replace('module.', '', 1) if key.startswith('module.') else key: value
                     for key, value in state_dict.items()
                 }
-                model.load_state_dict(stripped)
+                model.load_state_dict(stripped, strict=False)
             model.eval()
         except HTTPException:
             raise
