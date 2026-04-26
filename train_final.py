@@ -46,6 +46,10 @@ from model.improved.training_utils import (
     get_adamw_param_groups,
     ranking_loss,
 )
+from model.improved.swa import StochasticWeightAveraging
+from model.improved.dropedge import dropedge_graph
+from model.improved.mixup import pair_mixup, mixup_loss
+from model.improved.hard_neg import hard_neg_ratio_schedule, sample_adaptive_hard_negatives
 from topology_features import extract_topology_features
 
 
@@ -72,6 +76,31 @@ DATASET_PRESETS = {
         "hgt_in_dim": 512,
         "hgt_head_dim": 64,
         "topo_hidden": 192,
+        # B-dataset has only 269 drugs (vs C=663, F=592). The default training
+        # recipe (plateau scheduler + focal loss + EMA warmup=80) was tuned on
+        # C/F and starves B: plateau scheduler decays LR to min_lr by ~epoch
+        # 250, focal loss further suppresses gradient on the small drug side,
+        # and EMA tracking starts at epoch 80 while AUC is still climbing
+        # rapidly (~0.85 -> 0.93 between epoch 80 and 1000), so EMA shadow
+        # weights drag eval AUC below the live model. Override here so B uses
+        # cosine schedule, plain CE, and EMA tracking that begins after the
+        # main AUC ascent has stabilized.
+        "scheduler": "cosine",
+        "use_focal": False,
+        "use_ema": False,
+        "use_ranking": False,
+        "ema_warmup_epochs": 200,
+        "pair_mode": "moe",
+        "use_swa": True,
+        "swa_start_ratio": 0.70,
+        "swa_freq": 10,
+        "use_dropedge": True,
+        "dropedge_p": 0.10,
+        "use_mixup": True,
+        "mixup_alpha": 0.20,
+        "use_adaptive_hard_neg": True,
+        "hard_neg_target_ratio": 0.40,
+        "hard_neg_warmup": 200,
     },
     "C-dataset": {
         "lr": 1e-4,
@@ -82,6 +111,20 @@ DATASET_PRESETS = {
         "hgt_in_dim": 256,
         "hgt_head_dim": 32,
         "topo_hidden": 128,
+        "use_ema": False,
+        "use_focal": False,
+        "use_ranking": False,
+        "pair_mode": "moe",
+        "use_swa": True,
+        "swa_start_ratio": 0.70,
+        "swa_freq": 10,
+        "use_dropedge": True,
+        "dropedge_p": 0.15,
+        "use_mixup": True,
+        "mixup_alpha": 0.20,
+        "use_adaptive_hard_neg": True,
+        "hard_neg_target_ratio": 0.50,
+        "hard_neg_warmup": 200,
     },
     "F-dataset": {
         "lr": 8e-5,
@@ -94,6 +137,20 @@ DATASET_PRESETS = {
         "topo_hidden": 192,
         "similarity_view_mode": "multi",
         "positive_weight_mode": "global_log",
+        "use_ema": False,
+        "use_focal": False,
+        "use_ranking": False,
+        "pair_mode": "moe",
+        "use_swa": True,
+        "swa_start_ratio": 0.70,
+        "swa_freq": 10,
+        "use_dropedge": True,
+        "dropedge_p": 0.15,
+        "use_mixup": True,
+        "mixup_alpha": 0.15,
+        "use_adaptive_hard_neg": True,
+        "hard_neg_target_ratio": 0.50,
+        "hard_neg_warmup": 200,
     },
 }
 
@@ -150,10 +207,47 @@ def validate_data_dir(data_dir):
         raise FileNotFoundError(f"Missing dataset files in {data_dir}: {', '.join(missing)}")
 
 
-def apply_dataset_preset(args):
+# Knobs whose CLI default is intentionally non-None (e.g. scheduler="plateau",
+# use_focal=True, ema_warmup_epochs=80) but where a dataset preset should still
+# be allowed to override the default when the user did not pass the flag
+# explicitly. Without this whitelist the loop below would skip them because
+# their current value is not None, which would silently ignore the preset.
+PRESET_OVERRIDABLE_KEYS = {
+    "scheduler",
+    "pair_mode",
+    "use_focal",
+    "use_ema",
+    "use_ranking",
+    "ema_warmup_epochs",
+    "ema_decay",
+    "lambda_cl",
+    "ranking_weight",
+    "grad_clip",
+    "use_swa",
+    "swa_start_ratio",
+    "swa_freq",
+    "use_dropedge",
+    "dropedge_p",
+    "use_mixup",
+    "mixup_alpha",
+    "use_adaptive_hard_neg",
+    "hard_neg_target_ratio",
+    "hard_neg_warmup",
+}
+
+
+def apply_dataset_preset(args, explicit_keys=None):
+    explicit_keys = explicit_keys or set()
     preset = DATASET_PRESETS.get(args.dataset, {})
     for key, value in preset.items():
-        if getattr(args, key, None) is None:
+        # Respect the user: if they passed --<key> on the CLI, never override.
+        if key in explicit_keys:
+            continue
+        current = getattr(args, key, None)
+        # Existing behavior: fill in any unset (None) hyperparameter from the
+        # preset. New behavior: also let presets override a few knobs whose
+        # parser default is non-None but which we tune per dataset.
+        if current is None or key in PRESET_OVERRIDABLE_KEYS:
             setattr(args, key, value)
 
     if args.similarity_view_mode is None:
@@ -331,8 +425,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_root", default=None, help="dataset directory; defaults to AMDGT_original/data/<dataset>")
     parser.add_argument("--result_root", default=None, help="output directory; defaults to Result/improved/<dataset>")
     parser.add_argument("--save_checkpoints", action=argparse.BooleanOptionalAction, default=False, help="save model checkpoints")
-    parser.add_argument("--eval_start_epoch", default=1, type=int, help="minimum epoch before evaluation begins")
-    parser.add_argument("--score_every", default=1, type=int, help="evaluate every N epochs after eval_start_epoch")
+    parser.add_argument("--eval_start_epoch", default=100, type=int, help="minimum epoch before evaluation begins")
+    parser.add_argument("--score_every", default=5, type=int, help="evaluate every N epochs after eval_start_epoch")
     parser.add_argument("--patience", default=180, type=int, help="early stopping patience in epochs without AUC improvement; <=0 disables early stopping")
     parser.add_argument("--lambda_cl", default=0.1, type=float, help="weight for contrastive alignment loss")
     parser.add_argument("--temperature", default=0.5, type=float, help="temperature for contrastive loss")
@@ -344,7 +438,7 @@ if __name__ == "__main__":
     parser.add_argument("--fold_limit", type=int, default=None, help="optional limit on number of folds to execute")
     parser.add_argument("--assoc_backbone", choices=["vanilla_hgt", "rlghgt"], default="vanilla_hgt", help="association encoder backbone")
     parser.add_argument("--fusion_mode", choices=["mva", "rvg", "mva_fuzzy"], default="mva", help="node-view fusion strategy")
-    parser.add_argument("--pair_mode", choices=["mul_mlp", "interaction"], default="mul_mlp", help="pair scoring head")
+    parser.add_argument("--pair_mode", choices=["mul_mlp", "interaction", "moe"], default="mul_mlp", help="pair scoring head")
     parser.add_argument("--gate_mode", choices=["scalar", "vector"], default="vector", help="fuzzy gate output type")
     parser.add_argument("--gate_bias_init", default=-2.0, type=float, help="initial bias for fuzzy gate")
     parser.add_argument("--grad_clip", default=1.0, type=float, help="max gradient norm; <=0 disables clipping")
@@ -354,6 +448,18 @@ if __name__ == "__main__":
     parser.add_argument("--use_focal", action=argparse.BooleanOptionalAction, default=True, help="use focal loss instead of plain CE")
     parser.add_argument("--use_ranking", action=argparse.BooleanOptionalAction, default=True, help="add BPR-style pairwise ranking loss")
     parser.add_argument("--hard_neg_ratio", default=0.3, type=float, help="fraction of ranking negatives drawn as hard negatives")
+    parser.add_argument("--use_swa", action=argparse.BooleanOptionalAction, default=False, help="use stochastic weight averaging for final fold evaluation")
+    parser.add_argument("--swa_start_ratio", default=0.70, type=float, help="fraction of training after which SWA snapshots start")
+    parser.add_argument("--swa_freq", default=10, type=int, help="SWA snapshot frequency in epochs")
+    parser.add_argument("--use_dropedge", action=argparse.BooleanOptionalAction, default=False, help="randomly drop similarity graph edges during training")
+    parser.add_argument("--dropedge_p", default=0.15, type=float, help="DropEdge probability for similarity graphs")
+    parser.add_argument("--use_mixup", action=argparse.BooleanOptionalAction, default=False, help="use pair-level mixup on pair logits and labels")
+    parser.add_argument("--mixup_alpha", default=0.20, type=float, help="Beta(alpha, alpha) parameter for pair-level mixup")
+    parser.add_argument("--use_adaptive_hard_neg", action=argparse.BooleanOptionalAction, default=False, help="adaptively down-weight easy negatives using current model scores")
+    parser.add_argument("--hard_neg_target_ratio", default=0.50, type=float, help="target fraction of negatives treated as hard after warmup")
+    parser.add_argument("--hard_neg_warmup", default=200, type=int, help="epochs to ramp adaptive hard-negative ratio")
+    parser.add_argument("--moe_experts", default=4, type=int, help="number of experts for pair_mode=moe")
+    parser.add_argument("--moe_hidden", default=384, type=int, help="hidden dimension for pair_mode=moe")
     parser.add_argument("--neg_resample_every", default=0, type=int, help="resample training negatives every N epochs (0 disables dynamic negatives)")
     parser.add_argument("--filter_assoc_positives_only", action=argparse.BooleanOptionalAction, default=True, help="build drdipr heterograph using training positives only (fixes BUG-09)")
     parser.add_argument("--use_relation_attention", action=argparse.BooleanOptionalAction, default=True, help="enable relation-aware attention in RLGHGT")
@@ -395,12 +501,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--amp",
         choices=["none", "auto", "bfloat16", "float16"],
-        default="none",
+        default="auto",
         help=(
-            "automatic mixed precision dtype for forward/backward. Default 'none' keeps "
-            "fp32 since this model loses ~0.02-0.03 AUC under fp16. Use 'bfloat16' on "
+            "automatic mixed precision dtype for forward/backward. Default 'auto' picks "
+            "bfloat16 on Ampere+ and float16 elsewhere. Use 'bfloat16' on "
             "Ampere+ (L4/A100) for ~1.4-1.8x speedup with minimal AUC drop, 'float16' for "
-            "max speed on T4/V100 at the cost of ~0.02-0.03 AUC, or 'auto' to pick per GPU."
+            "max speed on T4/V100 at the cost of possible AUC drop, or 'none' to force fp32."
         ),
     )
 
@@ -409,10 +515,16 @@ if __name__ == "__main__":
     for _arg in _sys.argv[1:]:
         if _arg.startswith("--"):
             _key = _arg.split("=", 1)[0].lstrip("-").replace("-", "_")
+            # BooleanOptionalAction maps `--no-foo` to args.foo, so strip the
+            # `no_` prefix when recording explicit flags. Otherwise the dataset
+            # preset would still override `args.foo` even though the user
+            # explicitly disabled it via `--no-foo`.
+            if _key.startswith("no_"):
+                _key = _key[3:]
             _explicit.add(_key)
 
     args = parser.parse_args()
-    apply_dataset_preset(args)
+    apply_dataset_preset(args, explicit_keys=_explicit)
     if args.fusion_mode == "mva_fuzzy":
         args.fusion_mode = "rvg"
 
@@ -469,6 +581,13 @@ if __name__ == "__main__":
         f"neg_resample_every={args.neg_resample_every} | "
         f"filter_assoc_positives_only={args.filter_assoc_positives_only}"
     )
+    logging.info(
+        f"SWA={args.use_swa} (start={args.swa_start_ratio:.2f}, freq={args.swa_freq}) | "
+        f"DropEdge={args.use_dropedge} (p={args.dropedge_p:.2f}) | "
+        f"Mixup={args.use_mixup} (alpha={args.mixup_alpha:.2f}) | "
+        f"AdaptiveHardNeg={args.use_adaptive_hard_neg} "
+        f"(target={args.hard_neg_target_ratio:.2f}, warmup={args.hard_neg_warmup})"
+    )
     logging.info(f"Similarity view mode: {args.similarity_view_mode} | Positive weight mode: {args.positive_weight_mode}")
     logging.info(
         "Model config: "
@@ -522,11 +641,13 @@ if __name__ == "__main__":
     logging.info(metric_header)
 
     aucs, auprs, accs, precs, recs, f1s, mccs, best_epochs = [], [], [], [], [], [], [], []
+    swa_aucs = []
     best_overall_auc = -1.0
     best_overall_path = None
     best_overall_payload = None
 
     max_folds = args.k_fold if args.fold_limit is None else min(args.k_fold, args.fold_limit)
+    swa_start_epoch = int(args.epochs * args.swa_start_ratio)
 
     for fold_idx in range(max_folds):
         logging.info(f'\n{"=" * 60}')
@@ -600,6 +721,10 @@ if __name__ == "__main__":
         # drag eval AUC below random. See training log "EMA: ..." line.
         ema = None
         neg_rng = np.random.default_rng(args.random_seed + fold_idx * 9973)
+        drop_rng = torch.Generator(device="cpu").manual_seed(args.random_seed + fold_idx * 7919)
+        mixup_rng = np.random.default_rng(args.random_seed + fold_idx * 31337)
+        hard_neg_rng = np.random.default_rng(args.random_seed + fold_idx * 41201)
+        swa = None
 
         # Per-fold GradScaler. A single shared scaler across folds carries scale
         # state and a step counter tied to the *previous* fold's optimizer; when
@@ -658,11 +783,24 @@ if __name__ == "__main__":
                     )
                 )
 
+            if args.use_dropedge and args.dropedge_p > 0.0:
+                train_drdr = dropedge_graph(drdr_graph, args.dropedge_p, drop_rng)
+                train_didi = dropedge_graph(didi_graph, args.dropedge_p, drop_rng)
+                if isinstance(train_drdr, dict):
+                    train_drdr = {name: graph.to(device) for name, graph in train_drdr.items()}
+                    train_didi = {name: graph.to(device) for name, graph in train_didi.items()}
+                else:
+                    train_drdr = train_drdr.to(device)
+                    train_didi = train_didi.to(device)
+            else:
+                train_drdr = drdr_graph
+                train_didi = didi_graph
+
             model.train()
             with autocast_ctx():
                 _, train_score, aux_losses = model(
-                    drdr_graph,
-                    didi_graph,
+                    train_drdr,
+                    train_didi,
                     drdipr_graph,
                     drug_feature,
                     disease_feature,
@@ -673,7 +811,27 @@ if __name__ == "__main__":
                     return_aux=True,
                 )
                 contrastive_loss = aux_losses.get("contrastive", train_score.new_tensor(0.0))
-                ce_loss = criterion(train_score, y_train)
+                mixup_applied = False
+                if args.use_mixup and args.mixup_alpha > 0.0:
+                    mixed_score, labels_a, labels_b, lam = pair_mixup(train_score, y_train, args.mixup_alpha, mixup_rng)
+                    if lam < 1.0 - 1e-6:
+                        ce_loss = mixup_loss(criterion, mixed_score, labels_a, labels_b, lam)
+                        mixup_applied = True
+
+                if not mixup_applied:
+                    if args.use_adaptive_hard_neg:
+                        hard_ratio = hard_neg_ratio_schedule(epoch, args.hard_neg_warmup, args.hard_neg_target_ratio)
+                        weights = sample_adaptive_hard_negatives(train_score.detach(), y_train, hard_ratio, hard_neg_rng)
+                        per_sample_ce = fn.cross_entropy(
+                            train_score,
+                            y_train,
+                            weight=class_weights,
+                            label_smoothing=max(0.0, float(args.label_smoothing)),
+                            reduction="none",
+                        )
+                        ce_loss = (per_sample_ce * weights).mean()
+                    else:
+                        ce_loss = criterion(train_score, y_train)
 
                 if args.use_ranking and args.ranking_weight > 0:
                     ranking_term = ranking_loss(
@@ -712,6 +870,15 @@ if __name__ == "__main__":
                 ema = ModelEMA(model, decay=args.ema_decay)
             if ema is not None:
                 ema.update(model)
+            if (
+                args.use_swa
+                and epoch >= swa_start_epoch
+                and (epoch + 1 - swa_start_epoch) % max(1, args.swa_freq) == 0
+            ):
+                if swa is None:
+                    swa = StochasticWeightAveraging(model, device=device)
+                else:
+                    swa.update(model)
 
             should_eval = (epoch + 1) >= args.eval_start_epoch and ((epoch + 1 - args.eval_start_epoch) % max(1, args.score_every) == 0)
             if should_eval or epoch == args.epochs - 1:
@@ -814,6 +981,65 @@ if __name__ == "__main__":
                         f"rnk {float(ranking_term.item()):.5f}"
                     )
 
+        if args.use_swa and swa is not None and swa.num_snapshots > 0:
+            live_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            swa.transfer_to(model)
+            model.eval()
+            with torch.no_grad(), autocast_ctx():
+                _, swa_score, _ = model(
+                    drdr_graph,
+                    didi_graph,
+                    drdipr_graph,
+                    drug_feature,
+                    disease_feature,
+                    protein_feature,
+                    x_test,
+                    drug_topo_feat=drug_topo_feat,
+                    disease_topo_feat=disease_topo_feat,
+                    return_aux=True,
+                )
+            swa_prob = fn.softmax(swa_score, dim=-1)[:, 1].cpu().numpy()
+            swa_pred = torch.argmax(swa_score, dim=-1).cpu().numpy()
+            swa_auc, swa_aupr, swa_acc, swa_prec, swa_rec, swa_f1, swa_mcc = get_metric(y_test, swa_pred, swa_prob)
+            logging.info(
+                f"Fold {fold_idx} SWA eval ({swa.num_snapshots} snapshots): "
+                f"AUC={swa_auc:.5f} AUPR={swa_aupr:.5f}"
+            )
+            swa_aucs.append(float(swa_auc))
+            if swa_auc > best_fold["AUC"] + 1e-6:
+                logging.info(f"SWA improves over running best ({best_fold['AUC']:.5f} -> {swa_auc:.5f})")
+                best_fold.update(
+                    {
+                        "AUC": float(swa_auc),
+                        "AUPR": float(swa_aupr),
+                        "Accuracy": float(swa_acc),
+                        "Precision": float(swa_prec),
+                        "Recall": float(swa_rec),
+                        "F1": float(swa_f1),
+                        "MCC": float(swa_mcc),
+                        "epoch": -1,
+                    }
+                )
+                if args.save_checkpoints:
+                    swa_checkpoint_path = os.path.join(args.result_dir, f"best_model_{args.model_tag}_fold{fold_idx}_swa.pth")
+                    save_checkpoint(swa_checkpoint_path, model, optimizer, scheduler, fold_idx, -1, best_fold, args)
+                if swa_auc > best_overall_auc:
+                    best_overall_auc = float(swa_auc)
+                    best_overall_payload = {
+                        "model_state_dict": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "best_metrics": best_fold.copy(),
+                        "fold": fold_idx,
+                        "epoch": -1,
+                        "args": vars(args),
+                        "is_swa": True,
+                    }
+                    if scheduler is not None:
+                        best_overall_payload["scheduler_state_dict"] = scheduler.state_dict()
+            model.load_state_dict(live_state)
+        else:
+            swa_aucs.append(float("nan"))
+
         aucs.append(best_fold["AUC"])
         auprs.append(best_fold["AUPR"])
         accs.append(best_fold["Accuracy"])
@@ -827,6 +1053,8 @@ if __name__ == "__main__":
         del model, optimizer, scheduler, drdipr_graph
         if ema is not None:
             del ema
+        if swa is not None:
+            del swa
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

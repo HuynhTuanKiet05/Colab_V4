@@ -254,6 +254,19 @@ class AMNTDDA(nn.Module):
             self.pair_head = ReferencePairHead(node_repr_dim)
         elif self.pair_mode == "interaction":
             self.pair_head = InteractionPairHead(node_repr_dim, dropout=args.dropout)
+        elif self.pair_mode == "moe":
+            # Lazy import so the legacy pair heads (mul_mlp / interaction) stay
+            # importable even if moe_pair_head fails to load for some reason.
+            from .moe_pair_head import MoEPairHead
+
+            moe_experts = int(getattr(args, "moe_experts", 4))
+            moe_hidden = int(getattr(args, "moe_hidden", 384))
+            self.pair_head = MoEPairHead(
+                node_dim=node_repr_dim,
+                num_experts=moe_experts,
+                hidden=moe_hidden,
+                dropout=args.dropout,
+            )
         else:
             raise ValueError(f"Unsupported pair_mode: {self.pair_mode}")
 
